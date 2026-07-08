@@ -1,6 +1,0 @@
-board:
-  name: beetle_esp32c6
-  full_name: Beetle ESP32-C6
-  vendor: seeed
-  socs:
-  - name: esp32c6

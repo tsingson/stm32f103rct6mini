@@ -1,0 +1,39 @@
+/* 位于：boards/stm32f103_mini.overlay */
+/ {
+	aliases {
+		led-user = &led_pc7;
+		button-user = &btn_pc6;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		led_pc7: led-pc7-node {
+			gpios = <&gpioc 7 GPIO_ACTIVE_LOW>;
+			label = "User LED PC7";
+		};
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+		btn_pc6: btn-pc6-node {
+			gpios = <&gpioc 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "User Button PC6";
+		};
+	};
+};
+
+&clk_hsi {
+	status = "okay";
+};
+
+&pll {
+	status = "disabled";
+};
+
+&rcc {
+	clocks = <&clk_hsi>;
+	clock-frequency = <DT_FREQ_M(8)>;
+	ahb-prescaler = <1>;
+	apb1-prescaler = <1>;
+	apb2-prescaler = <1>;
+};
