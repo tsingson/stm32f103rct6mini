@@ -1,0 +1,13 @@
+/ {
+	aliases {
+		led-test = &led_test_node;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		led_test_node: led-test-node {
+			gpios = <&gpioa 8 GPIO_ACTIVE_LOW>;
+			label = "Test LED";
+		};
+	};
+};

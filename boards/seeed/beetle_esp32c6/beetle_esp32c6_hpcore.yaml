@@ -1,0 +1,27 @@
+identifier: beetle_esp32c6/esp32c6/hpcore
+name: Beetle ESP32-C6 HP Core
+vendor: seeed
+type: mcu
+arch: riscv
+toolchain:
+  - zephyr
+supported:
+  - adc
+  - gpio
+  - watchdog
+  - uart
+  - dma
+  - pwm
+  - spi
+  - counter
+  - entropy
+  - i2c
+  - i2s
+  - netif:openthread
+  - netif:wifi
+  - crypto
+  - retained_mem
+
+testing:
+  ignore_tags:
+    - bluetooth
