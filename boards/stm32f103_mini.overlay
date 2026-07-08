@@ -1,43 +1,96 @@
-/* 位于：boards/stm32f103_mini.overlay */
 / {
 	aliases {
+		/* 对齐 C 代码中的按键与 LED 标识符 */
 		led-user = &led_pc7;
 		button-user = &btn_pc6;
+
+		/* 4G 模块与 GPS 模块的电源控制引脚别名 */
+		modem-power = &pwr_4g;
+		gps-power = &pwr_gps;
 	};
 
 	leds {
 		compatible = "gpio-leds";
 		led_pc7: led-pc7-node {
+			/* 照片右侧标有 PC7 丝印的物理用户 LED 灯 */
 			gpios = <&gpioc 7 GPIO_ACTIVE_LOW>;
 			label = "User LED PC7";
+		};
+
+		pwr_4g: pwr-4g-node {
+			/* 右下角 C8 针脚：用于输出高/低电平控制 4G 模块的电源使能(EN/MOS) */
+			gpios = <&gpioc 8 GPIO_ACTIVE_HIGH>;
+			label = "4G Modem Power Control";
+		};
+
+		pwr_gps: pwr-gps-node {
+			/* 右下角 C9 针脚：用于输出高/低电平控制 GPS 模块的供电使能 */
+			gpios = <&gpioc 9 GPIO_ACTIVE_HIGH>;
+			label = "GPS Module Power Control";
 		};
 	};
 
 	buttons {
 		compatible = "gpio-keys";
 		btn_pc6: btn-pc6-node {
+			/* 照片中间标有 PC6 丝印的物理用户按键 */
 			gpios = <&gpioc 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 			label = "User Button PC6";
 		};
 	};
 };
 
-/* 替换 overlay 中尾部的时钟段落，用以验证板载外部 8MHz 晶振是否完好 */
-&clk_hse {
-	clock-frequency = <DT_FREQ_M(8)>; /* 声明板载晶振为 8MHz */
+/* ==================== 1. 4G 模块专用硬件串口 (USART2) ==================== */
+&usart2 {
+	/* 强行复用并对齐上排左侧的 A2 (TX) 和 A3 (RX) 针脚 */
+	pinctrl-0 = <&usart2_tx_pa2 &usart2_rx_pa3>;
+	pinctrl-names = "default";
+	current-speed = <115200>; /* 移远/移芯等 4G Cat.1 模组的标准默认 AT 波特率 */
+	status = "okay";
+};
+
+/* ==================== 2. GPS 模块专用硬件串口 (USART3) ==================== */
+&usart3 {
+	/* 强行复用并对齐上排右侧的 B10 (TX) 和 B11 (RX) 针脚 */
+	pinctrl-0 = <&usart3_tx_pb10 &usart3_rx_pb11>;
+	pinctrl-names = "default";
+	current-speed = <9600>; /* 标配第十代 RATE M10 Nona 模块的原生标准波特率 */
+	status = "okay";
+};
+
+/* ==================== 3. SSD1306 OLED 屏幕专用硬件 I2C (I2C1) ==================== */
+&i2c1 {
+	/* 强行复用并对齐下排左侧的 B6 (SCL) 和 B7 (SDA) 针脚 */
+	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
+	pinctrl-names = "default";
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_STANDARD>; /* 标准 100kHz I2C 速率 */
+
+	/* 在硬件 I2C1 总线上直接挂载显示屏驱动子节点 */
+	ssd1306: ssd1306@3c {
+		compatible = "solomon,ssd1306fb";
+		reg = <0x3c>; /* 0.96寸 OLED 屏幕全行业通用的标准 I2C 硬件七位物理地址 */
+		width = <128>;
+		height = <64>;
+		segment-remap;
+		com-invdir;
+		prechargep = <0x22>;
+	};
+};
+
+/* ==================== 4. 绝对安全的 8MHz 内部时钟配置 ==================== */
+&clk_hsi {
 	status = "okay";
 };
 
 &pll {
-	clocks = <&clk_hse>; /* 将 PLL 的输入源从 HSI 改为 HSE 外部晶振 */
-	mul = <9>;           /* 8MHz * 9 = 72MHz */
-	status = "okay";
+	status = "disabled"; /* 验证阶段禁用 PLL 锁相环，完全排除时钟抖动 */
 };
 
 &rcc {
-	clocks = <&pll>;
-	clock-frequency = <DT_FREQ_M(72)>; /* 满频 72MHz */
+	clocks = <&clk_hsi>;
+	clock-frequency = <DT_FREQ_M(8)>; /* 主频锚定在 HSI 纯净 8MHz，确保串口波特率完美无乱码 */
 	ahb-prescaler = <1>;
-	apb1-prescaler = <2>; /* APB1 极限 36MHz */
-	apb2-prescaler = <1>; /* APB2 极限 72MHz */
+	apb1-prescaler = <1>;
+	apb2-prescaler = <1>;
 };
