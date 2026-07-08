@@ -22,18 +22,22 @@
 	};
 };
 
-&clk_hsi {
+/* 替换 overlay 中尾部的时钟段落，用以验证板载外部 8MHz 晶振是否完好 */
+&clk_hse {
+	clock-frequency = <DT_FREQ_M(8)>; /* 声明板载晶振为 8MHz */
 	status = "okay";
 };
 
 &pll {
-	status = "disabled";
+	clocks = <&clk_hse>; /* 将 PLL 的输入源从 HSI 改为 HSE 外部晶振 */
+	mul = <9>;           /* 8MHz * 9 = 72MHz */
+	status = "okay";
 };
 
 &rcc {
-	clocks = <&clk_hsi>;
-	clock-frequency = <DT_FREQ_M(8)>;
+	clocks = <&pll>;
+	clock-frequency = <DT_FREQ_M(72)>; /* 满频 72MHz */
 	ahb-prescaler = <1>;
-	apb1-prescaler = <1>;
-	apb2-prescaler = <1>;
+	apb1-prescaler = <2>; /* APB1 极限 36MHz */
+	apb2-prescaler = <1>; /* APB2 极限 72MHz */
 };
