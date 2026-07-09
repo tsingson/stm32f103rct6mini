@@ -85,13 +85,13 @@ void push_display_ui_update(void)
     memset(&msg, 0, sizeof(msg));
 
     /* 填充多行文本 */
-    strncpy(msg.lines[0], "IOT TRACKER v4.4", DISPLAY_LINE_MAX_LEN);
-    snprintf(msg.lines[1], DISPLAY_LINE_MAX_LEN, "MODE STATE: [%d]", (int)current_fsm_state);
+    strncpy(msg.lines[0], "IOT v4.4", DISPLAY_LINE_MAX_LEN);
+    snprintf(msg.lines[1], DISPLAY_LINE_MAX_LEN, "MODE: [%d]", (int)current_fsm_state);
 
     if (gpio_pin_get_dt(&btn) == 1) {
-        strncpy(msg.lines[2], "STATUS: ACTIVE", DISPLAY_LINE_MAX_LEN);
+        strncpy(msg.lines[2], "S: ACTIVE", DISPLAY_LINE_MAX_LEN);
     } else {
-        strncpy(msg.lines[2], "STATUS: IDLE_WAIT", DISPLAY_LINE_MAX_LEN);
+        strncpy(msg.lines[2], "S: IDLE_WAIT", DISPLAY_LINE_MAX_LEN);
     }
 
     /*
@@ -104,7 +104,7 @@ void push_display_ui_update(void)
 /* =============================================================================== */
 
 static int64_t last_interrupt_time = 0;
-#define DEBOUNCE_DELAY_MS  30
+#define DEBOUNCE_DELAY_MS  3
 
 void button_pressed_isr(const struct device *port, struct gpio_callback *cb,
                         gpio_port_pins_t pins)
