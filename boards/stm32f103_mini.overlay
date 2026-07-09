@@ -93,5 +93,13 @@
 		compatible = "vnd,spi-device";
 		reg = <0>;
 		spi-max-frequency = <100000>; /* 从 1,000,000 降到 100,000 (100kHz) */
+		/* 新增：配置 INT1 中断引脚接在 PA1，高电平有效 */
+ 	//	irq-gpios = <&gpioa 1 GPIO_ACTIVE_HIGH>;
+	};
+};
+/ {
+	zephyr,user {
+		/* 把引脚挂在用户自定义节点下，避开兼容性检查 */
+		sensor-irq-gpios = <&gpioa 1 GPIO_ACTIVE_HIGH>;
 	};
 };
