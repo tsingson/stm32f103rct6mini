@@ -111,14 +111,15 @@ int lis3dh_reg_read(const struct spi_dt_spec* spi_spec, uint8_t reg, uint8_t* da
 //     return 0;
 // }
 
-int lis3dh_init(const struct spi_dt_spec *spi_spec)
+int lis3dh_init(const struct spi_dt_spec* spi_spec)
 {
     uint8_t who_am_i = 0;
     int ret;
 
     /* 1. 验证 ID */
     ret = lis3dh_reg_read(spi_spec, 0x0F, &who_am_i, 1);
-    if (ret < 0 || who_am_i != 0x33) {
+    if (ret < 0 || who_am_i != 0x33)
+    {
         return -ENODEV;
     }
 
@@ -156,7 +157,7 @@ int lis3dh_clear_interrupt(const struct spi_dt_spec* spi_spec, uint8_t* src)
     return lis3dh_reg_read(spi_spec, LIS3DH_REG_INT1_SRC, src, 1);
 }
 
-int lis3dh_reset_baseline(const struct spi_dt_spec *spi_spec)
+int lis3dh_reset_baseline(const struct spi_dt_spec* spi_spec)
 {
     uint8_t dummy;
     int ret;

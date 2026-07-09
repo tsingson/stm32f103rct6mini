@@ -27,11 +27,6 @@ int main(void)
     k_msleep(500);
 
 
-
-
-
-
-
     int ret;
     uint8_t int_src = 0;
 
@@ -45,7 +40,8 @@ int main(void)
 
     // 1. 初始化 LIS3DH 寄存器配置（此时传感器开始通电，滤波器开始工作）
     ret = lis3dh_init(&spi_dev);
-    if (ret < 0) {
+    if (ret < 0)
+    {
         printk("Sensor init failed: %d\n", ret);
         return 0;
     }
@@ -54,25 +50,25 @@ int main(void)
     k_msleep(200);
 
     uint8_t who_am_i = 0;
-   ret =  lis3dh_reg_read(&spi_dev, 0x0F, &who_am_i, 1);
+    ret = lis3dh_reg_read(&spi_dev, 0x0F, &who_am_i, 1);
 
-    if (ret < 0) {
+    if (ret < 0)
+    {
         printk("LIS3DSH WHO_AM_I read failed: %d\n", ret);
         return ret;
-    } else
+    }
+    else
     {
         printk("LIS3DSH WHO_AM_I: 0x%02X\n", who_am_i);
     }
 
     // 3. 稳准狠：此时传感器已完全稳定，执行校准，扣除重力基准并强行释放 INT1 高电平
     ret = lis3dh_reset_baseline(&spi_dev);
-    if (ret < 0) {
+    if (ret < 0)
+    {
         printk("Reset baseline failed: %d\n", ret);
         return 0;
     }
-
-
-
 
 
     /* 💡 核心新增：让高通滤波器飞一会儿（等待 100ms 彻底滤除重力分量） */
@@ -109,10 +105,21 @@ int main(void)
         lis3dh_clear_interrupt(&spi_dev, &int_src);
         k_msleep(800);
         /* 触发时仅打印单行日志 */
-        printk("%d Sensor woke up STM32. (Interrupt Source: 0x%02X)\n", count,  int_src);
+        printk("%d Sensor woke up STM32. (Interrupt Source: 0x%02X)\n", count, int_src);
+
+        /* 顺便打印一下触发时的即时数据 */
+        uint8_t axis_data[6];
+        if (lis3dh_reg_read(&spi_dev, LIS3DH_REG_OUT_X_L, axis_data, 6) == 0)
+        {
+            int16_t x = (int16_t)((axis_data[1] << 8) | axis_data[0]);
+            int16_t y = (int16_t)((axis_data[3] << 8) | axis_data[2]);
+            int16_t z = (int16_t)((axis_data[5] << 8) | axis_data[4]);
+            printk("   Accel Data -> X: %d | Y: %d | Z: %d\n", x, y, z);
+        }
+
 
         /* 800ms 防抖，防止手拿放过程中连续弹出一堆日志 */
         k_msleep(800);
-        count ++;
+        count++;
     }
 }
