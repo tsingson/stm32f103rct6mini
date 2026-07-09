@@ -97,21 +97,27 @@ int main(void)
 
     while (1) {
         ret = lis3dsh_reg_read(LIS3DSH_REG_OUT_X_L, axis_data, 6);
-        if (ret == 0) {
-            /* 现在的 axis_data 已经去除了 dummy 字节，[0]就是 X_L */
-            int16_t x_raw = (int16_t)((axis_data[1] << 8) | axis_data[0]);
-            int16_t y_raw = (int16_t)((axis_data[3] << 8) | axis_data[2]);
-            int16_t z_raw = (int16_t)((axis_data[5] << 8) | axis_data[4]);
 
-            /* 转换为 g 物理单位 */
+        int16_t x_raw = (int16_t)((axis_data[1] << 8) | axis_data[0]);
+        int16_t y_raw = (int16_t)((axis_data[3] << 8) | axis_data[2]);
+        int16_t z_raw = (int16_t)((axis_data[5] << 8) | axis_data[4]);
+
+        /* 如果发现三轴数据全是 0 */
+        if (x_raw == 0 && y_raw == 0 && z_raw == 0) {
+            uint8_t check_id = 0;
+            lis3dsh_reg_read(LIS3DSH_REG_WHO_AM_I, &check_id, 1);
+            printk("[Warning] Data is ZERO! Checking WHO_AM_I = 0x%02X\n", check_id);
+
+            /* 尝试重新向配置寄存器写 0x67 把它唤醒 */
+            lis3dsh_reg_write(LIS3DSH_REG_CTRL4, 0x67);
+        } else {
+            /* 正常打印数据 */
             float x_g = (float)x_raw * 0.061f / 1000.0f;
             float y_g = (float)y_raw * 0.061f / 1000.0f;
             float z_g = (float)z_raw * 0.061f / 1000.0f;
-
             printk("X: %7.5f g | Y: %7.5f g | Z: %7.5f g\n", x_g, y_g, z_g);
-        } else {
-            printk("SPI Read Error: %d\n", ret);
         }
+
         k_msleep(500);
     }
 }
