@@ -1,14 +1,15 @@
+/* src/main.c */
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/display.h>     /* Zephyr 标准显示屏抽象层 */
-#include <zephyr/display/cfb.h>          /* 标准字符帧缓冲区 */
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/version.h>
 #include <zephyr/pm/pm.h>
-#include <zephyr/pm/policy.h>            /* 引入现代策略锁 API */
+#include <zephyr/pm/policy.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "ssd1306_app.h" /* 引入新拆分的显示子模块头文件 */
 
 #if !DT_NODE_EXISTS(DT_ALIAS(led_user)) || !DT_NODE_EXISTS(DT_ALIAS(button_user))
 #error "Error: Critical device tree aliases missing!"
@@ -18,18 +19,12 @@ static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led_user), gpio
 static const struct gpio_dt_spec btn = GPIO_DT_SPEC_GET(DT_ALIAS(button_user), gpios);
 static struct gpio_callback button_cb_data;
 
-static const struct device* display_dev = DEVICE_DT_GET(DT_NODELABEL(ssd1306));
-
 K_SEM_DEFINE(sleep_countdown_sem, 0, 1);
 
-enum tracker_state
-{
+enum tracker_state {
     STATE_0_HEARTBEAT = 0,
-    STATE_1_TRACKING = 1,
-    STATE_3_EMERGENCY = 3,
-    STATE_4_BATTERY_REP = 4
+    STATE_1_TRACKING = 1
 };
-
 static enum tracker_state current_fsm_state = STATE_0_HEARTBEAT;
 
 /* ==================== 异步日志 Ring Buffer 模块 ==================== */
@@ -38,17 +33,13 @@ static enum tracker_state current_fsm_state = STATE_0_HEARTBEAT;
 #define PRINT_THREAD_STACK_SIZE 1024
 #define PRINT_THREAD_PRIORITY 10
 
-struct log_item
-{
-    char str[MAX_LOG_STR_LEN];
-};
-
+struct log_item { char str[MAX_LOG_STR_LEN]; };
 RING_BUF_DECLARE(log_ring_buf, sizeof(struct log_item) * LOG_QUEUE_SIZE);
 static struct k_spinlock log_lock;
 K_CONDVAR_DEFINE(log_condvar);
 K_MUTEX_DEFINE(log_mutex);
 
-void safe_log(const char* format, ...)
+void safe_log(const char *format, ...)
 {
     struct log_item item;
     va_list args;
@@ -58,68 +49,56 @@ void safe_log(const char* format, ...)
 
     k_spinlock_key_t key = k_spin_lock(&log_lock);
     uint32_t free_space = ring_buf_space_get(&log_ring_buf);
-    if (free_space < sizeof(struct log_item))
-    {
+    if (free_space < sizeof(struct log_item)) {
         struct log_item dummy;
-        ring_buf_get(&log_ring_buf, (uint8_t*)&dummy, sizeof(struct log_item));
+        ring_buf_get(&log_ring_buf, (uint8_t *)&dummy, sizeof(struct log_item));
     }
-    ring_buf_put(&log_ring_buf, (const uint8_t*)&item, sizeof(struct log_item));
+    ring_buf_put(&log_ring_buf, (const uint8_t *)&item, sizeof(struct log_item));
     k_spin_unlock(&log_lock, key);
     k_condvar_signal(&log_condvar);
 }
 
-void uart_print_thread_entry(void* p1, void* p2, void* p3)
+void uart_print_thread_entry(void *p1, void *p2, void *p3)
 {
     struct log_item item_to_print;
-    while (1)
-    {
+    while (1) {
         k_mutex_lock(&log_mutex, K_FOREVER);
-        while (ring_buf_is_empty(&log_ring_buf))
-        {
+        while (ring_buf_is_empty(&log_ring_buf)) {
             k_condvar_wait(&log_condvar, &log_mutex, K_FOREVER);
         }
         k_spinlock_key_t key = k_spin_lock(&log_lock);
-        uint32_t bytes_read = ring_buf_get(&log_ring_buf, (uint8_t*)&item_to_print, sizeof(struct log_item));
+        uint32_t bytes_read = ring_buf_get(&log_ring_buf, (uint8_t *)&item_to_print, sizeof(struct log_item));
         k_spin_unlock(&log_lock, key);
         k_mutex_unlock(&log_mutex);
 
-        if (bytes_read == sizeof(struct log_item))
-        {
+        if (bytes_read == sizeof(struct log_item)) {
             printk("%s", item_to_print.str);
         }
     }
 }
+K_THREAD_DEFINE(uart_print_tid, PRINT_THREAD_STACK_SIZE, uart_print_thread_entry, NULL, NULL, NULL, PRINT_THREAD_PRIORITY, 0, 0);
 
-K_THREAD_DEFINE(uart_print_tid, PRINT_THREAD_STACK_SIZE, uart_print_thread_entry, NULL, NULL, NULL,
-                PRINT_THREAD_PRIORITY, 0, 0);
-
-/* ==================== 屏幕UI数据刷新显示函数 ==================== */
-void update_oled_ui(void)
+/* ==================== 统一的非阻塞 UI 更新投递代理 ==================== */
+void push_display_ui_update(void)
 {
-    if (!device_is_ready(display_dev))
-    {
-        return;
+    struct display_msg_packet msg;
+    memset(&msg, 0, sizeof(msg));
+
+    /* 填充多行文本 */
+    strncpy(msg.lines[0], "IOT TRACKER v4.4", DISPLAY_LINE_MAX_LEN);
+    snprintf(msg.lines[1], DISPLAY_LINE_MAX_LEN, "MODE STATE: [%d]", (int)current_fsm_state);
+
+    if (gpio_pin_get_dt(&btn) == 1) {
+        strncpy(msg.lines[2], "STATUS: ACTIVE", DISPLAY_LINE_MAX_LEN);
+    } else {
+        strncpy(msg.lines[2], "STATUS: IDLE_WAIT", DISPLAY_LINE_MAX_LEN);
     }
 
-    char buf[32]; /* 修正：定义为标准本地栈缓冲区字符数组 */
-
-    cfb_framebuffer_clear(display_dev, false);
-
-    cfb_draw_text(display_dev, "IOT TRACKER v4.4", 0, 0);
-
-    snprintf(buf, sizeof(buf), "MODE STATE: [%d]", (int)current_fsm_state);
-    cfb_draw_text(display_dev, buf, 0, 18);
-
-    if (gpio_pin_get_dt(&btn) == 1)
-    {
-        cfb_draw_text(display_dev, "STATUS: ACTIVE", 0, 36);
-    }
-    else
-    {
-        cfb_draw_text(display_dev, "STATUS: IDLE_WAIT", 0, 36);
-    }
-
-    cfb_framebuffer_finalize(display_dev);
+    /*
+     * 核心解耦：将打包好的数据无脑丢进消息队列。
+     * K_NO_WAIT 代表如果队列由于极端原因满了，直接覆盖或报错退出，绝不在中断/业务中发生阻塞！
+     */
+    k_msgq_put(&display_msg_q, &msg, K_NO_WAIT);
 }
 
 /* =============================================================================== */
@@ -127,27 +106,25 @@ void update_oled_ui(void)
 static int64_t last_interrupt_time = 0;
 #define DEBOUNCE_DELAY_MS  30
 
-void button_pressed_isr(const struct device* port, struct gpio_callback* cb,
+void button_pressed_isr(const struct device *port, struct gpio_callback *cb,
                         gpio_port_pins_t pins)
 {
     int64_t current_time = k_uptime_get();
-    if ((current_time - last_interrupt_time) < DEBOUNCE_DELAY_MS)
-    {
+    if ((current_time - last_interrupt_time) < DEBOUNCE_DELAY_MS) {
         return;
     }
 
     int btn_pressed = gpio_pin_get_dt(&btn);
-    if (btn_pressed >= 0)
-    {
+    if (btn_pressed >= 0) {
         gpio_pin_set_dt(&led, btn_pressed);
 
-        if (btn_pressed)
-        {
+        if (btn_pressed) {
             safe_log("[ISR] 按键按下 -> LED 点亮 (唤醒状态保持)\n");
             current_fsm_state = (current_fsm_state == STATE_0_HEARTBEAT) ? STATE_1_TRACKING : STATE_0_HEARTBEAT;
-        }
-        else
-        {
+
+            /* 在中断上下文直接调用，非阻塞向队列派发 UI 数据 */
+            push_display_ui_update();
+        } else {
             safe_log("[ISR] 按键释放 -> LED 熄灭 (准备休眠触发)\n");
             k_sem_give(&sleep_countdown_sem);
         }
@@ -157,10 +134,9 @@ void button_pressed_isr(const struct device* port, struct gpio_callback* cb,
 
 int main(void)
 {
-    safe_log("--- ABrobot STM32F103RCT6 Async OLED Display Test ---\n");
+    safe_log("--- ABrobot STM32F103RCT6 Split Thread UI System ---\n");
 
-    if (!gpio_is_ready_dt(&led) || !gpio_is_ready_dt(&btn))
-    {
+    if (!gpio_is_ready_dt(&led) || !gpio_is_ready_dt(&btn)) {
         return -1;
     }
     gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
@@ -170,92 +146,60 @@ int main(void)
     gpio_init_callback(&button_cb_data, button_pressed_isr, BIT(btn.pin));
     gpio_add_callback(btn.port, &button_cb_data);
 
-    if (!device_is_ready(display_dev))
-    {
-        safe_log("CRITICAL: SSD1306 OLED display device not ready via I2C1\n");
-    }
-    else
-    {
-        cfb_framebuffer_init(display_dev);
+    /* 开机主动刷新一次初始数据包到显示队列 */
+    push_display_ui_update();
 
-        uint8_t num_fonts = cfb_get_numof_fonts(display_dev);
-        for (uint8_t i = 0; i < num_fonts; i++)
-        {
-            /* 核心修正：严格对齐 Zephyr 4.4.1 的 uint8_t 宽高数据类型定义 */
-            uint8_t width, height;
-            cfb_get_font_size(display_dev, i, &width, &height);
-            safe_log("Loaded Built-in Font index %d: Size %dx%d\n", (int)i, (int)width, (int)height);
-        }
-
-        cfb_set_kerning(display_dev, 0);
-        safe_log("OLED Driver initialization sequence passed.\n");
-
-        update_oled_ui();
-    }
-
-    while (1)
-    {
-        update_oled_ui();
+    while (1) {
+        /* 主常态循环，如果有状态变更随时投递 */
+        push_display_ui_update();
 
         k_sem_take(&sleep_countdown_sem, K_FOREVER);
 
         safe_log("松开检测成功，系统将在 2 秒后进入微安级 Deep Sleep...\n");
-        update_oled_ui();
+        push_display_ui_update();
         k_msleep(2000);
 
-        if (gpio_pin_get_dt(&btn) == 0)
-        {
+        if (gpio_pin_get_dt(&btn) == 0) {
             safe_log("\n⚠️-----------------[ CRITICAL: PRE-SLEEP WARNING ]-----------------⚠️\n");
             safe_log("[🚨 断电提醒] 即将进入微安级深度睡眠(Stop Mode)！\n");
 
-            if (device_is_ready(display_dev))
-            {
-                display_blanking_on(display_dev);
+            /*
+             * 需求 3 的多维度拦截：
+             * 1. 拦截一：必须等显示内核消息队列里的挂起包被完全消耗掉 (`num_used == 0`)
+             * 2. 拦截二：必须等物理串口日志环形缓冲区被完全清空 (`is_empty == true`)
+             */
+            while ((k_msgq_num_used_get(&display_msg_q) > 0) || !ring_buf_is_empty(&log_ring_buf)) {
+                k_yield(); /* 疯狂挂起当前主任务，把时间切片借给显示线程和串口线程，直到它们全干完活 */
             }
 
-            while (!ring_buf_is_empty(&log_ring_buf))
-            {
-                k_yield();
-            }
+            /* 最后一包数据渲染完毕，物理关断屏幕硬件电荷泵，彻底防漏电 */
+            ssd1306_set_blanking(true);
+
             k_msleep(5);
 
-            /*
-             * ==================== Zephyr 4.4.1 现代策略控制休眠法 ====================
-             * 废弃旧的强制接口，改为通过策略锁（Policy Lock）控制内核：
-             * 我们锁定所有的浅度睡眠等级（比如 RUNTIME_IDLE），强制告诉内核在 WFI 时
-             * 必须滑入最深也最省电的 SUSPEND_TO_RAM (Stop 模式)。
-             */
-            /*
- * ==================== Zephyr 4.4.1 现代策略控制休眠法 ====================
- * 修正：使用 Zephyr 4.4.1 官方标准的 PM_ALL_SUBSTATES 宏
- */
+            /* 现代策略控制休眠 */
             pm_policy_state_lock_get(PM_STATE_RUNTIME_IDLE, PM_ALL_SUBSTATES);
-            /* 执行内核级汇编指令，芯片正式断电沉睡... */
             k_cpu_idle();
 
-
             /* =======================================================================
-                * ⚡ 硬件苏醒线（显式、稳健、最高优先级的复苏段落）
-                * ======================================================================= */
-
-            /* 修正：解锁时同样对齐使用 PM_ALL_SUBSTATES */
+             * ⚡ 硬件苏醒线（显式、稳健、最高优先级的复苏段落）
+             * ======================================================================= */
             pm_policy_state_lock_put(PM_STATE_RUNTIME_IDLE, PM_ALL_SUBSTATES);
 
             SET_BIT(RCC->CR, RCC_CR_HSION);
-            while (READ_BIT(RCC->CR, RCC_CR_HSIRDY) == 0);
+            while(READ_BIT(RCC->CR, RCC_CR_HSIRDY) == 0);
 
 #if CONFIG_TRACING
             sys_trace_idle_exit();
 #endif
-            if (device_is_ready(display_dev))
-            {
-                display_blanking_off(display_dev);
-            }
+            /* 硬件睁眼的第一微秒：物理拉通屏幕供电扫描线 */
+            ssd1306_set_blanking(false);
 
             safe_log("\n⚡-----------------[ CRITICAL: WAKEUP DETECTED ]-----------------⚡\n");
-            safe_log("[📢 唤醒提醒] 检测到 PC6 外部中断！系统时钟和显示外设已硬恢复就绪！\n");
+            safe_log("[📢 唤醒提醒] 检测到 PC6 外部中断！多线程消息内核和显示外设同步复苏！\n");
 
-            update_oled_ui();
+            /* 唤醒后，无脑投递刷新一包全新复苏状态的 UI 报文 */
+            push_display_ui_update();
         }
     }
     return 0;
