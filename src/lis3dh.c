@@ -102,3 +102,16 @@ int lis3dh_clear_interrupt(const struct spi_dt_spec* spi_spec, uint8_t* src)
 {
     return lis3dh_reg_read(spi_spec, LIS3DH_REG_INT1_SRC, src, 1);
 }
+
+int lis3dh_reset_baseline(const struct spi_dt_spec *spi_spec)
+{
+    uint8_t dummy;
+    int ret;
+
+    /* 1. 在芯片稳定后读取 REFERENCE 寄存器，强行把当前的静态重力作为 0 坐标 baseline */
+    ret = lis3dh_reg_read(spi_spec, 0x26, &dummy, 1);
+    if (ret < 0) return ret;
+
+    /* 2. 顺便通过读取 INT1_SRC 清空一次当前可能已经卡死的中断引脚 */
+    return lis3dh_clear_interrupt(spi_spec, &dummy);
+}

@@ -34,4 +34,7 @@ int lis3dh_reg_write(const struct spi_dt_spec *spi_spec, uint8_t reg, uint8_t da
  */
 int lis3dh_clear_interrupt(const struct spi_dt_spec *spi_spec, uint8_t *src);
 
+/* 刷新高通滤波器基准，将当前状态归零，并清空历史中断锁存 */
+int lis3dh_reset_baseline(const struct spi_dt_spec *spi_spec);
+
 #endif /* LIS3DH_H */
