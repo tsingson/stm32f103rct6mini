@@ -8,28 +8,33 @@
 #define DISPLAY_THREAD_STACK_SIZE 1024
 #define DISPLAY_THREAD_PRIORITY   11
 
-static const struct device *display_dev = DEVICE_DT_GET(DT_NODELABEL(ssd1306));
+static const struct device* display_dev = DEVICE_DT_GET(DT_NODELABEL(ssd1306));
 
 K_MSGQ_DEFINE(display_msg_q, sizeof(struct display_msg_packet), 4, 4);
 
 void ssd1306_set_blanking(bool blank_on)
 {
-    if (device_is_ready(display_dev)) {
-        if (blank_on) {
+    if (device_is_ready(display_dev))
+    {
+        if (blank_on)
+        {
             display_blanking_on(display_dev);
-        } else {
+        }
+        else
+        {
             display_blanking_off(display_dev);
         }
     }
 }
 
-void ssd1306_display_thread_entry(void *p1, void *p2, void *p3)
+void ssd1306_display_thread_entry(void* p1, void* p2, void* p3)
 {
     struct display_msg_packet incoming_msg;
     uint8_t selected_font_idx = 0;
     uint8_t min_font_height = 255; /* 动态锚定最小字体高度 */
 
-    if (!device_is_ready(display_dev)) {
+    if (!device_is_ready(display_dev))
+    {
         return;
     }
 
@@ -41,11 +46,13 @@ void ssd1306_display_thread_entry(void *p1, void *p2, void *p3)
      * 盘点全板加载的所有字库，找出高度(height)最小的那款字库，将其索引记录下来。
      */
     uint8_t num_fonts = cfb_get_numof_fonts(display_dev);
-    for (uint8_t i = 0; i < num_fonts; i++) {
+    for (uint8_t i = 0; i < num_fonts; i++)
+    {
         uint8_t width, height;
         cfb_get_font_size(display_dev, i, &width, &height);
 
-        if (height < min_font_height) {
+        if (height < min_font_height)
+        {
             min_font_height = height;
             selected_font_idx = i;
         }
@@ -58,17 +65,20 @@ void ssd1306_display_thread_entry(void *p1, void *p2, void *p3)
     cfb_draw_text(display_dev, "OLED 8X8 SYSTEM", 0, 0);
     cfb_framebuffer_finalize(display_dev);
 
-    while (1) {
-        if (k_msgq_get(&display_msg_q, &incoming_msg, K_FOREVER) == 0) {
-
+    while (1)
+    {
+        if (k_msgq_get(&display_msg_q, &incoming_msg, K_FOREVER) == 0)
+        {
             cfb_framebuffer_clear(display_dev, false);
 
             /*
              * 动态排版：行间距跟随刚才盘点出来的实际最小字体高度 `min_font_height` 走！
              * 让这块 128x64 的小屏幕展现出最高的信息密集度。
              */
-            for (int i = 0; i < DISPLAY_MAX_LINES; i++) {
-                if (strlen(incoming_msg.lines[i]) > 0) {
+            for (int i = 0; i < DISPLAY_MAX_LINES; i++)
+            {
+                if (strlen(incoming_msg.lines[i]) > 0)
+                {
                     cfb_draw_text(display_dev, incoming_msg.lines[i], 0, i * (min_font_height + 2));
                 }
             }

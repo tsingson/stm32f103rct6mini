@@ -32,17 +32,16 @@ static atomic_t uart_rx_line_drop_count;
 static atomic_t log_queue_drop_count;
 
 
-
-static void gps_pwr_on(void) {
+static void gps_pwr_on(void)
+{
     (void)gpio_pin_set_dt(&n10_w_gpio, 1);
 }
 
 
-static void gps_pwr_off  (void) {
+static void gps_pwr_off(void)
+{
     (void)gpio_pin_set_dt(&n10_w_gpio, 0);
 }
-
-
 
 
 static bool should_print_speed_detail(double speed_kmh)
@@ -321,7 +320,7 @@ static void gps_control_thread(void* p1, void* p2, void* p3)
         else { safe_log_publish("[SESSION] FAIL. Power off."); }
 
         safe_log_publish("[PWR] OFF.");
-        (void)gps_pwr_off( );
+        (void)gps_pwr_off();
 
         nmea_build_observability_summary(
             &obs,

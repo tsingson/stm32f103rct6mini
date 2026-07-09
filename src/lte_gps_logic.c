@@ -35,12 +35,14 @@ void set_system_timestamp(uint32_t ts)
 heartbeat_report_t* heartbeat_create(uint8_t status, uint8_t battery,
                                      uint16_t sleep_time, const char* dev_id)
 {
-    if (dev_id == NULL) {
+    if (dev_id == NULL)
+    {
         return NULL;
     }
 
     heartbeat_report_t* hb = k_malloc(sizeof(heartbeat_report_t));
-    if (hb == NULL) {
+    if (hb == NULL)
+    {
         return NULL;
     }
 
@@ -55,21 +57,24 @@ heartbeat_report_t* heartbeat_create(uint8_t status, uint8_t battery,
 
 void heartbeat_destroy(heartbeat_report_t* hb)
 {
-    if (hb != NULL) {
+    if (hb != NULL)
+    {
         k_free(hb);
     }
 }
 
 bool heartbeat_serialize(const heartbeat_report_t* hb, uint8_t* buffer, size_t* out_len)
 {
-    if (hb == NULL || buffer == NULL || out_len == NULL) {
+    if (hb == NULL || buffer == NULL || out_len == NULL)
+    {
         return false;
     }
 
     size_t id_len = strlen(hb->device_id);
     size_t total_len = 4U + id_len;
 
-    if (total_len > 256U) {
+    if (total_len > 256U)
+    {
         return false;
     }
 
@@ -92,7 +97,8 @@ static uint32_t retry_backoff_ms(uint32_t attempt)
 static bool wait_for_pattern(const uint8_t* pattern, size_t pattern_len,
                              uint32_t timeout_ms, size_t* match_offset)
 {
-    if (pattern == NULL || pattern_len == 0U) {
+    if (pattern == NULL || pattern_len == 0U)
+    {
         return false;
     }
 
@@ -100,12 +106,17 @@ static bool wait_for_pattern(const uint8_t* pattern, size_t pattern_len,
     uint32_t start = k_uptime_get_32();
     uint32_t sleep_ms = 10U;
 
-    while ((k_uptime_get_32() - start) < timeout_ms) {
+    while ((k_uptime_get_32() - start) < timeout_ms)
+    {
         size_t rx_len = lte_snapshot_rx_raw(snapshot, sizeof(snapshot));
-        if (rx_len >= pattern_len) {
-            for (size_t i = 0U; i + pattern_len <= rx_len; i++) {
-                if (memcmp(&snapshot[i], pattern, pattern_len) == 0) {
-                    if (match_offset != NULL) {
+        if (rx_len >= pattern_len)
+        {
+            for (size_t i = 0U; i + pattern_len <= rx_len; i++)
+            {
+                if (memcmp(&snapshot[i], pattern, pattern_len) == 0)
+                {
+                    if (match_offset != NULL)
+                    {
                         *match_offset = i;
                     }
                     return true;
@@ -114,7 +125,8 @@ static bool wait_for_pattern(const uint8_t* pattern, size_t pattern_len,
         }
 
         k_sleep(K_MSEC(sleep_ms));
-        if (sleep_ms < 80U) {
+        if (sleep_ms < 80U)
+        {
             sleep_ms <<= 1;
         }
     }
@@ -124,44 +136,51 @@ static bool wait_for_pattern(const uint8_t* pattern, size_t pattern_len,
 
 bool ntp_sync(uint32_t* out_timestamp)
 {
-    if (modem == NULL || out_timestamp == NULL) {
+    if (modem == NULL || out_timestamp == NULL)
+    {
         return false;
     }
 
-    uint8_t ntp_req[4] = { FRAME_HEADER_0, FRAME_HEADER_1, CMD_NTP_REQUEST, 0U };
+    uint8_t ntp_req[4] = {FRAME_HEADER_0, FRAME_HEADER_1, CMD_NTP_REQUEST, 0U};
 
-    for (uint32_t attempt = 0U; attempt < LTE_SEND_RETRY_COUNT; attempt++) {
+    for (uint32_t attempt = 0U; attempt < LTE_SEND_RETRY_COUNT; attempt++)
+    {
         lte_clear_rx_buffer();
 
-        if (!modem->socket_open(0, LTE_SERVER_HOST, LTE_SERVER_PORT)) {
+        if (!modem->socket_open(0, LTE_SERVER_HOST, LTE_SERVER_PORT))
+        {
             k_sleep(K_MSEC(retry_backoff_ms(attempt)));
             continue;
         }
 
-        if (!modem->socket_send_prepare(0, sizeof(ntp_req))) {
+        if (!modem->socket_send_prepare(0, sizeof(ntp_req)))
+        {
             modem->socket_close(0);
             k_sleep(K_MSEC(retry_backoff_ms(attempt)));
             continue;
         }
 
         lte_clear_rx_buffer();
-        if (!lte_send_raw_stream(ntp_req, sizeof(ntp_req))) {
+        if (!lte_send_raw_stream(ntp_req, sizeof(ntp_req)))
+        {
             modem->socket_close(0);
             k_sleep(K_MSEC(retry_backoff_ms(attempt)));
             continue;
         }
 
-        const uint8_t ntp_prefix[4] = { FRAME_HEADER_0, FRAME_HEADER_1, CMD_NTP_RESPONSE, 4U };
+        const uint8_t ntp_prefix[4] = {FRAME_HEADER_0, FRAME_HEADER_1, CMD_NTP_RESPONSE, 4U};
         size_t match_offset = 0U;
 
-        if (wait_for_pattern(ntp_prefix, sizeof(ntp_prefix), LTE_NTP_TIMEOUT_MS, &match_offset)) {
+        if (wait_for_pattern(ntp_prefix, sizeof(ntp_prefix), LTE_NTP_TIMEOUT_MS, &match_offset))
+        {
             uint8_t snapshot[LTE_RX_BUF_SIZE];
             size_t rx_len = lte_snapshot_rx_raw(snapshot, sizeof(snapshot));
-            if (rx_len >= match_offset + 8U) {
+            if (rx_len >= match_offset + 8U)
+            {
                 uint32_t ntp_time = ((uint32_t)snapshot[match_offset + 4U] << 24) |
-                                    ((uint32_t)snapshot[match_offset + 5U] << 16) |
-                                    ((uint32_t)snapshot[match_offset + 6U] << 8) |
-                                    ((uint32_t)snapshot[match_offset + 7U]);
+                    ((uint32_t)snapshot[match_offset + 5U] << 16) |
+                    ((uint32_t)snapshot[match_offset + 6U] << 8) |
+                    ((uint32_t)snapshot[match_offset + 7U]);
 
                 system_timestamp = ntp_time;
                 *out_timestamp = ntp_time;
@@ -180,11 +199,13 @@ bool ntp_sync(uint32_t* out_timestamp)
 static bool tcp_send_frame(uint8_t cmd, const uint8_t* payload, size_t payload_len,
                            const char* server_host, uint16_t server_port)
 {
-    if (modem == NULL || payload == NULL || server_host == NULL) {
+    if (modem == NULL || payload == NULL || server_host == NULL)
+    {
         return false;
     }
 
-    if (payload_len > UINT8_MAX) {
+    if (payload_len > UINT8_MAX)
+    {
         return false;
     }
 
@@ -199,28 +220,33 @@ static bool tcp_send_frame(uint8_t cmd, const uint8_t* payload, size_t payload_l
 
     const uint8_t ack = 0x01U;
 
-    for (uint32_t attempt = 0U; attempt < LTE_SEND_RETRY_COUNT; attempt++) {
+    for (uint32_t attempt = 0U; attempt < LTE_SEND_RETRY_COUNT; attempt++)
+    {
         lte_clear_rx_buffer();
 
-        if (!modem->socket_open(0, server_host, server_port)) {
+        if (!modem->socket_open(0, server_host, server_port))
+        {
             k_sleep(K_MSEC(retry_backoff_ms(attempt)));
             continue;
         }
 
-        if (!modem->socket_send_prepare(0, packet_len)) {
+        if (!modem->socket_send_prepare(0, packet_len))
+        {
             modem->socket_close(0);
             k_sleep(K_MSEC(retry_backoff_ms(attempt)));
             continue;
         }
 
         lte_clear_rx_buffer();
-        if (!lte_send_raw_stream(packet, packet_len)) {
+        if (!lte_send_raw_stream(packet, packet_len))
+        {
             modem->socket_close(0);
             k_sleep(K_MSEC(retry_backoff_ms(attempt)));
             continue;
         }
 
-        if (wait_for_pattern(&ack, 1U, LTE_ACK_TIMEOUT_MS, NULL)) {
+        if (wait_for_pattern(&ack, 1U, LTE_ACK_TIMEOUT_MS, NULL))
+        {
             modem->socket_close(0);
             return true;
         }
@@ -234,14 +260,16 @@ static bool tcp_send_frame(uint8_t cmd, const uint8_t* payload, size_t payload_l
 
 bool gps_report_send(const gps_report_t* report, const char* server_host, uint16_t server_port)
 {
-    if (report == NULL) {
+    if (report == NULL)
+    {
         return false;
     }
 
     uint8_t payload[256];
     size_t payload_len = 0U;
 
-    if (!gps_report_serialize(report, payload, &payload_len)) {
+    if (!gps_report_serialize(report, payload, &payload_len))
+    {
         return false;
     }
 
@@ -250,14 +278,16 @@ bool gps_report_send(const gps_report_t* report, const char* server_host, uint16
 
 bool heartbeat_send(const heartbeat_report_t* hb, const char* server_host, uint16_t server_port)
 {
-    if (hb == NULL) {
+    if (hb == NULL)
+    {
         return false;
     }
 
     uint8_t payload[256];
     size_t payload_len = 0U;
 
-    if (!heartbeat_serialize(hb, payload, &payload_len)) {
+    if (!heartbeat_serialize(hb, payload, &payload_len))
+    {
         return false;
     }
 

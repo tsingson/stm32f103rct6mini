@@ -8,12 +8,14 @@
 gps_report_t* gps_report_create(float lat, float lng, uint32_t ts,
                                 uint8_t sat, float spd, const char* dev_id)
 {
-    if (dev_id == NULL) {
+    if (dev_id == NULL)
+    {
         return NULL;
     }
 
     gps_report_t* report = k_malloc(sizeof(gps_report_t));
-    if (report == NULL) {
+    if (report == NULL)
+    {
         return NULL;
     }
 
@@ -30,21 +32,24 @@ gps_report_t* gps_report_create(float lat, float lng, uint32_t ts,
 
 void gps_report_destroy(gps_report_t* report)
 {
-    if (report != NULL) {
+    if (report != NULL)
+    {
         k_free(report);
     }
 }
 
 bool gps_report_serialize(const gps_report_t* report, uint8_t* buffer, size_t* out_len)
 {
-    if (report == NULL || buffer == NULL || out_len == NULL) {
+    if (report == NULL || buffer == NULL || out_len == NULL)
+    {
         return false;
     }
 
     size_t id_len = strlen(report->device_id);
     size_t total_len = GPS_PAYLOAD_MIN_LEN + id_len;
 
-    if (total_len > 256U) {
+    if (total_len > 256U)
+    {
         return false;
     }
 
@@ -86,37 +91,39 @@ bool gps_report_serialize(const gps_report_t* report, uint8_t* buffer, size_t* o
 
 bool gps_report_deserialize(const uint8_t* buffer, size_t buf_len, gps_report_t* report)
 {
-    if (buffer == NULL || report == NULL || buf_len < GPS_PAYLOAD_MIN_LEN) {
+    if (buffer == NULL || report == NULL || buf_len < GPS_PAYLOAD_MIN_LEN)
+    {
         return false;
     }
 
     uint32_t lat_bits = ((uint32_t)buffer[0] << 24) |
-                        ((uint32_t)buffer[1] << 16) |
-                        ((uint32_t)buffer[2] << 8) |
-                        ((uint32_t)buffer[3]);
+        ((uint32_t)buffer[1] << 16) |
+        ((uint32_t)buffer[2] << 8) |
+        ((uint32_t)buffer[3]);
     memcpy(&report->latitude, &lat_bits, sizeof(report->latitude));
 
     uint32_t lng_bits = ((uint32_t)buffer[4] << 24) |
-                        ((uint32_t)buffer[5] << 16) |
-                        ((uint32_t)buffer[6] << 8) |
-                        ((uint32_t)buffer[7]);
+        ((uint32_t)buffer[5] << 16) |
+        ((uint32_t)buffer[6] << 8) |
+        ((uint32_t)buffer[7]);
     memcpy(&report->longitude, &lng_bits, sizeof(report->longitude));
 
     report->timestamp = ((uint32_t)buffer[8] << 24) |
-                        ((uint32_t)buffer[9] << 16) |
-                        ((uint32_t)buffer[10] << 8) |
-                        ((uint32_t)buffer[11]);
+        ((uint32_t)buffer[9] << 16) |
+        ((uint32_t)buffer[10] << 8) |
+        ((uint32_t)buffer[11]);
 
     report->sat_count = buffer[12];
 
     uint32_t spd_bits = ((uint32_t)buffer[13] << 24) |
-                        ((uint32_t)buffer[14] << 16) |
-                        ((uint32_t)buffer[15] << 8) |
-                        ((uint32_t)buffer[16]);
+        ((uint32_t)buffer[14] << 16) |
+        ((uint32_t)buffer[15] << 8) |
+        ((uint32_t)buffer[16]);
     memcpy(&report->speed, &spd_bits, sizeof(report->speed));
 
     size_t id_len = buf_len - GPS_PAYLOAD_MIN_LEN;
-    if (id_len >= sizeof(report->device_id)) {
+    if (id_len >= sizeof(report->device_id))
+    {
         id_len = sizeof(report->device_id) - 1U;
     }
     memcpy(report->device_id, &buffer[17], id_len);
@@ -127,7 +134,8 @@ bool gps_report_deserialize(const uint8_t* buffer, size_t buf_len, gps_report_t*
 
 void gps_report_print(const gps_report_t* report)
 {
-    if (report == NULL) {
+    if (report == NULL)
+    {
         return;
     }
 

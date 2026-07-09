@@ -6,7 +6,8 @@
 #include <stdbool.h>
 
 /* 定义4G模组通用接口结构体 */
-struct lte_modem_driver {
+struct lte_modem_driver
+{
     const char* name;
     bool (*init_modem)(void);
     bool (*check_alive)(void);

@@ -23,7 +23,7 @@ static bool ml307r_check_alive(void)
 static bool ml307r_connect_network(const char* apn)
 {
     if (apn == NULL || strlen(apn) == 0) return false;
-    
+
     char cmd[96];
     snprintf(cmd, sizeof(cmd), "AT+CGDCONT=1,\"IP\",\"%s\"", apn);
     if (!lte_send_cmd_expect(cmd, "OK", 3000)) return false;
@@ -43,7 +43,7 @@ static bool ml307r_socket_open(int sock_id, const char* host, uint16_t port)
 {
     if (!VALID_SOCKET_ID(sock_id)) return false;
     if (host == NULL || strlen(host) >= MAX_HOST_LEN) return false;
-    
+
     char cmd[96];
     snprintf(cmd, sizeof(cmd), "AT+MIPCLOSE=%d", sock_id);
     (void)lte_send_cmd_expect(cmd, "OK", 1000);
@@ -59,7 +59,7 @@ static bool ml307r_socket_send_prepare(int sock_id, size_t data_len)
 {
     if (!VALID_SOCKET_ID(sock_id)) return false;
     if (data_len == 0 || data_len > 65535) return false;
-    
+
     char cmd[32];
     snprintf(cmd, sizeof(cmd), "AT+MIPSEND=%d,%zu", sock_id, data_len);
     lte_clear_rx_buffer();
@@ -70,7 +70,7 @@ static bool ml307r_socket_send_prepare(int sock_id, size_t data_len)
 static bool ml307r_socket_close(int sock_id)
 {
     if (!VALID_SOCKET_ID(sock_id)) return false;
-    
+
     char cmd[32];
     snprintf(cmd, sizeof(cmd), "AT+MIPCLOSE=%d", sock_id);
     return lte_send_cmd_expect(cmd, "OK", 2000);

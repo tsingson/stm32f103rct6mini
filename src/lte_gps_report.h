@@ -5,7 +5,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-typedef struct {
+typedef struct
+{
     float latitude;
     float longitude;
     uint32_t timestamp;

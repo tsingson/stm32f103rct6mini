@@ -1,123 +1,267 @@
 /* src/lis3dsh_app.c */
 #include "lis3dsh_app.h"
-#include "ssd1306_app.h" /* 引入我们上一轮拆分出来的显示队列抽象 */
-#include <zephyr/device.h>
-#include <zephyr/drivers/sensor.h>
-#include <stdio.h>
-#include <string.h>
+#include "ssd1306_app.h"
+
 #include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
 
+#include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/spi.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
 
-// static const struct device *lis3dsh_dev = DEVICE_DT_GET(DT_NODELABEL(lis3dsh));
-static const struct device *lis3dsh_dev;
+#define LIS3DSH_WHO_AM_I        0x0F
+#define LIS3DSH_CTRL_REG4       0x20
+#define LIS3DSH_OUT_X_L         0x28
+#define LIS3DSH_READ            BIT(7)
+#define LIS3DSH_AUTO_INC        BIT(6)
+#define LIS3DSH_WHO_AM_I_VALUE  0x3F
+
+#define POLL_PERIOD_MS          100
+#define MONITOR_WINDOW_MS       5000
+#define REQUIRED_WALK_STEPS     4
+#define MOVE_DELTA_THRESHOLD    900
+
+static const struct device *const lis3dsh_spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi1));
+static const struct gpio_dt_spec lis3dsh_cs = {
+	.port = DEVICE_DT_GET(DT_NODELABEL(gpioa)),
+	.pin = 4,
+	.dt_flags = GPIO_ACTIVE_LOW,
+};
+
+static struct spi_config lis3dsh_spi_cfg = {
+	.frequency = 1000000,
+	.operation = SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_MODE_CPOL | SPI_MODE_CPHA,
+	.slave = 0,
+	.cs = NULL,
+};
 
 bool is_elderly_moving = false;
 
-/* 内部状态运动积分监控变量 */
-static uint32_t stride_vibration_count = 0;
-static int64_t last_isr_timestamp = 0;
+static uint32_t stride_vibration_count;
+static int16_t last_x, last_y, last_z;
+static bool have_baseline;
+static bool lis3dsh_ready;
 
-#define MONITOR_WINDOW_MS   5000  /* 5秒滑动时间校验窗（约对应行走 5 米的空间跨度） */
-#define REQUIRED_WALK_STEPS 4     /* 5秒内必须至少连续踏出 4 步冲击，才确认为真实位移 */
-
-/*
- * LIS3DSH 硬件硬中断服务程序 (ISR Handler)
- * 当老人上下楼梯产生重力颠簸、或左右步行晃动时，LIS3DSH 内部硬件状态机
- * 瞬间拉高 INT1 引脚，STM32 在硬件层无阻塞进入本函数。
- */
-static void lis3dsh_trigger_handler(const struct device *dev,
-                                    const struct sensor_trigger *trig)
+static int lis3dsh_cs_assert(void)
 {
-    int64_t current_time = k_uptime_get();
-    struct display_msg_packet msg;
-
-    /* 20ms 内的极速消抖，防止金属弹片或杂散电气噪声引发二次虚假中断 */
-    if ((current_time - last_isr_timestamp) < 20) {
-        return;
-    }
-    last_isr_timestamp = current_time;
-
-    /* 步伐冲击积分累加 */
-    stride_vibration_count++;
-
-    /* 核心逻辑核查：5秒滑动窗口内，连续跨步数突破 4 步 */
-    if (stride_vibration_count >= REQUIRED_WALK_STEPS) {
-        is_elderly_moving = true;
-
-        /* 异步封装报文，直接投递给低优先级的屏幕线程刷新显示 */
-        memset(&msg, 0, sizeof(msg));
-        strncpy(msg.lines[0], "RADAR MONITOR", DISPLAY_LINE_MAX_LEN);
-        strncpy(msg.lines[1], "STATE: MOVING!", DISPLAY_LINE_MAX_LEN);
-        snprintf(msg.lines[2], DISPLAY_LINE_MAX_LEN, "STEPS ACC: %d", (int)stride_vibration_count);
-        strncpy(msg.lines[3], "4G/GPS: READY", DISPLAY_LINE_MAX_LEN);
-
-        k_msgq_put(&display_msg_q, &msg, K_NO_WAIT);
-    }
+	return gpio_pin_set_dt(&lis3dsh_cs, 0);
 }
 
-/* 监控常驻工作线程：专门负责在 5秒 滑动窗口到期时，检测并强制归位为 no move */
-void lis3dsh_monitor_thread_entry(void *p1, void *p2, void *p3)
+static int lis3dsh_cs_deassert(void)
 {
-    struct display_msg_packet msg;
-
-    while (1) {
-        /* 每隔 5 秒钟进行一次周期性考核 */
-        k_msleep(MONITOR_WINDOW_MS);
-
-        if (stride_vibration_count < REQUIRED_WALK_STEPS) {
-            /*
-             * 如果 5 秒内步伐冲击次数不足 4 次，说明老人处于原地静止、安稳坐姿，
-             * 或者只是 5 米范围内的微小动作、微幅翻身，一律判定为 no move，拦截耗电外设。
-             */
-            is_elderly_moving = false;
-
-            memset(&msg, 0, sizeof(msg));
-            strncpy(msg.lines[0], "RADAR MONITOR", DISPLAY_LINE_MAX_LEN);
-            strncpy(msg.lines[1], "STATE: NO MOVE", DISPLAY_LINE_MAX_LEN);
-            strncpy(msg.lines[2], "STABLE WINDOW", DISPLAY_LINE_MAX_LEN);
-            strncpy(msg.lines[3], "4G/GPS: SILENT", DISPLAY_LINE_MAX_LEN);
-
-            k_msgq_put(&display_msg_q, &msg, K_NO_WAIT);
-        }
-
-        /* 时窗结束，强制积分清零，无条件进入下一个 5 秒的时间轴周期考核 */
-        stride_vibration_count = 0;
-    }
+	return gpio_pin_set_dt(&lis3dsh_cs, 1);
 }
+
+static int lis3dsh_reg_write(uint8_t reg, uint8_t val)
+{
+	uint8_t tx[2] = { reg & 0x3F, val };
+
+	const struct spi_buf tx_buf = {
+		.buf = tx,
+		.len = sizeof(tx),
+	};
+	const struct spi_buf_set tx_set = {
+		.buffers = &tx_buf,
+		.count = 1,
+	};
+
+	int ret = lis3dsh_cs_assert();
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = spi_write(lis3dsh_spi_dev, &lis3dsh_spi_cfg, &tx_set);
+	(void)lis3dsh_cs_deassert();
+
+	return ret;
+}
+
+static int lis3dsh_reg_read(uint8_t reg, uint8_t *val)
+{
+	uint8_t tx[2] = { reg | LIS3DSH_READ, 0x00 };
+	uint8_t rx[2] = { 0 };
+
+	const struct spi_buf tx_buf = {
+		.buf = tx,
+		.len = sizeof(tx),
+	};
+	const struct spi_buf rx_buf = {
+		.buf = rx,
+		.len = sizeof(rx),
+	};
+	const struct spi_buf_set tx_set = {
+		.buffers = &tx_buf,
+		.count = 1,
+	};
+	const struct spi_buf_set rx_set = {
+		.buffers = &rx_buf,
+		.count = 1,
+	};
+
+	int ret = lis3dsh_cs_assert();
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = spi_transceive(lis3dsh_spi_dev, &lis3dsh_spi_cfg, &tx_set, &rx_set);
+	(void)lis3dsh_cs_deassert();
+
+	if (ret == 0) {
+		*val = rx[1];
+	}
+
+	return ret;
+}
+
+static int lis3dsh_read_xyz(int16_t *x, int16_t *y, int16_t *z)
+{
+	uint8_t tx[7] = {
+		LIS3DSH_OUT_X_L | LIS3DSH_READ | LIS3DSH_AUTO_INC,
+		0, 0, 0, 0, 0, 0
+	};
+	uint8_t rx[7] = { 0 };
+
+	const struct spi_buf tx_buf = {
+		.buf = tx,
+		.len = sizeof(tx),
+	};
+	const struct spi_buf rx_buf = {
+		.buf = rx,
+		.len = sizeof(rx),
+	};
+	const struct spi_buf_set tx_set = {
+		.buffers = &tx_buf,
+		.count = 1,
+	};
+	const struct spi_buf_set rx_set = {
+		.buffers = &rx_buf,
+		.count = 1,
+	};
+
+	int ret = lis3dsh_cs_assert();
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = spi_transceive(lis3dsh_spi_dev, &lis3dsh_spi_cfg, &tx_set, &rx_set);
+	(void)lis3dsh_cs_deassert();
+
+	if (ret < 0) {
+		return ret;
+	}
+
+	*x = (int16_t)((rx[2] << 8) | rx[1]);
+	*y = (int16_t)((rx[4] << 8) | rx[3]);
+	*z = (int16_t)((rx[6] << 8) | rx[5]);
+
+	return 0;
+}
+
+static void lis3dsh_publish_state(bool moving, uint32_t steps)
+{
+	struct display_msg_packet msg;
+
+	memset(&msg, 0, sizeof(msg));
+	strncpy(msg.lines[0], "RADAR MONITOR", DISPLAY_LINE_MAX_LEN);
+
+	if (moving) {
+		strncpy(msg.lines[1], "STATE: MOVING!", DISPLAY_LINE_MAX_LEN);
+		snprintf(msg.lines[2], DISPLAY_LINE_MAX_LEN, "STEPS ACC: %u", steps);
+		strncpy(msg.lines[3], "4G/GPS: READY", DISPLAY_LINE_MAX_LEN);
+	} else {
+		strncpy(msg.lines[1], "STATE: NO MOVE", DISPLAY_LINE_MAX_LEN);
+		strncpy(msg.lines[2], "STABLE WINDOW", DISPLAY_LINE_MAX_LEN);
+		strncpy(msg.lines[3], "4G/GPS: SILENT", DISPLAY_LINE_MAX_LEN);
+	}
+
+	k_msgq_put(&display_msg_q, &msg, K_NO_WAIT);
+}
+
+static void lis3dsh_poll_thread_entry(void *p1, void *p2, void *p3)
+{
+	int64_t window_start = k_uptime_get();
+
+	while (1) {
+		if (!lis3dsh_ready) {
+			k_msleep(100);
+			continue;
+		}
+
+		int16_t x, y, z;
+		if (lis3dsh_read_xyz(&x, &y, &z) == 0) {
+			if (!have_baseline) {
+				last_x = x;
+				last_y = y;
+				last_z = z;
+				have_baseline = true;
+			} else {
+				int32_t delta = abs(x - last_x) + abs(y - last_y) + abs(z - last_z);
+				if (delta > MOVE_DELTA_THRESHOLD) {
+					stride_vibration_count++;
+				}
+				last_x = x;
+				last_y = y;
+				last_z = z;
+			}
+		}
+
+		int64_t now = k_uptime_get();
+		if ((now - window_start) >= MONITOR_WINDOW_MS) {
+			is_elderly_moving = (stride_vibration_count >= REQUIRED_WALK_STEPS);
+			lis3dsh_publish_state(is_elderly_moving, stride_vibration_count);
+
+			stride_vibration_count = 0;
+			window_start = now;
+		}
+
+		k_msleep(POLL_PERIOD_MS);
+	}
+}
+
+K_THREAD_DEFINE(lis3dsh_poll_tid, 1024, lis3dsh_poll_thread_entry,
+		NULL, NULL, NULL, 9, 0, 0);
 
 int lis3dsh_motion_init(void)
 {
-    // 新增：动态绑定设备
-    lis3dsh_dev = device_get_binding(DEVICE_DT_NAME(DT_NODELABEL(lis3dsh)));
-    if (lis3dsh_dev == NULL) {
-        printk("CRITICAL ERROR: LIS3DSH driver instance not found in Zephyr 4.4.1!\n");
-        return -ENODEV;
-    }
+	if (!device_is_ready(lis3dsh_spi_dev)) {
+		printk("LIS3DSH SPI bus not ready\n");
+		return -ENODEV;
+	}
 
-    if (!device_is_ready(lis3dsh_dev)) {
-        printk("CRITICAL ERROR: LIS3DSH I2C Device hardware not ready!\n");
-        return -ENODEV; // 将原来的 -1 改为 -ENODEV
-    }
-    // ... 后续代码
+	if (!device_is_ready(lis3dsh_cs.port)) {
+		printk("LIS3DSH CS GPIO not ready\n");
+		return -ENODEV;
+	}
 
+	int ret = gpio_pin_configure_dt(&lis3dsh_cs, GPIO_OUTPUT_INACTIVE);
+	if (ret < 0) {
+		printk("LIS3DSH CS GPIO configure failed: %d\n", ret);
+		return ret;
+	}
 
-    /* 配置 LIS3DSH 的硬件触发器属性：设置为任何轴发生数据跳变（DELTA）时触发 */
-    struct sensor_trigger trig = {
-        .type = SENSOR_TRIG_DELTA,
-        .chan = SENSOR_CHAN_ACCEL_XYZ,
-    };
+	uint8_t who_am_i = 0;
+	ret = lis3dsh_reg_read(LIS3DSH_WHO_AM_I, &who_am_i);
+	if (ret < 0) {
+		printk("LIS3DSH WHO_AM_I read failed: %d\n", ret);
+		return ret;
+	}
 
-    /* 将我们的硬件 ISR 回调函数正式注册挂载到内核的传感器抽象管理链表中 */
-    int ret = sensor_trigger_set(lis3dsh_dev, &trig, lis3dsh_trigger_handler);
-    if (ret < 0) {
-        printk("Error: Failed to bind LIS3DSH interrupt trigger (err %d)\n", ret);
-        return ret;
-    }
+	if (who_am_i != LIS3DSH_WHO_AM_I_VALUE) {
+		printk("LIS3DSH WHO_AM_I mismatch: 0x%02x\n", who_am_i);
+		return -EIO;
+	}
 
-    printk("LIS3DSH Any-Motion Hardware Ext-Interrupt configured and armed.\n");
-    return 0;
+	ret = lis3dsh_reg_write(LIS3DSH_CTRL_REG4, 0x67);
+	if (ret < 0) {
+		printk("LIS3DSH CTRL_REG4 write failed: %d\n", ret);
+		return ret;
+	}
+
+	lis3dsh_ready = true;
+	printk("LIS3DSH SPI init OK\n");
+	return 0;
 }
-
-/* 注册低功耗判定监控滑动窗口线程 */
-K_THREAD_DEFINE(lis3dsh_monitor_tid, 1024, lis3dsh_monitor_thread_entry,
-                NULL, NULL, NULL, 9, 0, 0); /* 优先级 9，确保判定时效性 */
