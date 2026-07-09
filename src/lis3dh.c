@@ -74,8 +74,21 @@ int lis3dh_init(const struct spi_dt_spec* spi_spec)
     /**
      *日志里读取到的 Interrupt Source: 0x55 意味着芯片自身的 X/Y/Z 三个轴在高通滤波后依然同时超标。有些面包板的电源纹波或者芯片高通滤波器的初始噪声较大，0x12（288mg）可能还是有些低。我们把阈值提高到 0x20（约 512mg，大约半个重力加速度）
      */
-    ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_THS, 0x20);
+    /* ❌ 错误的老代码：
+        * ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_CFG, 0x3F); // 开启了全部 High 和 Low 监听
+        */
+
+    /*  正确的代码：写入 0x2A (二进制 0010 1010)
+     *  Bit 5 (ZHIE) = 1
+     *  Bit 3 (YHIE) = 1
+     *  Bit 1 (XHIE) = 1
+     *  其余位（包括所有 Low 监听 XLIE/YLIE/ZLIE）全部保持 0！
+     */
+    ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_CFG, 0x2A);
     if (ret < 0) return ret;
+
+    // ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_THS, 0x20);
+    // if (ret < 0) return ret;
 
     /* 6. INT1_DURATION: 0 */
     ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_DURATION, 0x00);
