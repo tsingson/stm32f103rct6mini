@@ -41,70 +41,110 @@ int lis3dh_reg_read(const struct spi_dt_spec* spi_spec, uint8_t reg, uint8_t* da
     return ret;
 }
 
-int lis3dh_init(const struct spi_dt_spec* spi_spec)
+// int lis3dh_init(const struct spi_dt_spec* spi_spec)
+// {
+//     uint8_t who_am_i = 0;
+//     int ret;
+//
+//     /* 验证芯片身份 */
+//     ret = lis3dh_reg_read(spi_spec, LIS3DH_REG_WHO_AM_I, &who_am_i, 1);
+//     if (ret < 0 || (who_am_i != 0x33 && who_am_i != 0x3F))
+//     {
+//         return -ENODEV;
+//     }
+//
+//     /* 1. CTRL_REG1: 100Hz 采样率, 开启 X/Y/Z 轴 */
+//     ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_CTRL_REG1, 0x57);
+//     if (ret < 0) return ret;
+//
+//     /* 2. 修正 CTRL_REG2: 写入 0x09
+//      * 开启 FDS(Bit3)=1 和 HP_IA1(Bit0)=1，全面激活中断引擎的高通滤波器 */
+//     ret = lis3dh_reg_write(spi_spec, 0x21, 0x09);
+//     if (ret < 0) return ret;
+//
+//     /* 3. CTRL_REG3: 将 IA1 信号路由到物理 INT1 引脚 */
+//     ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_CTRL_REG3, 0x40);
+//     if (ret < 0) return ret;
+//
+//     /* 4. CTRL_REG5: 开启 LIR1 中断锁存，确保 STM32 不漏信号 */
+//     ret = lis3dh_reg_write(spi_spec, 0x24, 0x08);
+//     if (ret < 0) return ret;
+//
+//     /* 5. INT1_THS: 设定阈值为 0x12 (约 288mg) */
+//     /**
+//      *日志里读取到的 Interrupt Source: 0x55 意味着芯片自身的 X/Y/Z 三个轴在高通滤波后依然同时超标。有些面包板的电源纹波或者芯片高通滤波器的初始噪声较大，0x12（288mg）可能还是有些低。我们把阈值提高到 0x20（约 512mg，大约半个重力加速度）
+//      */
+//     /* ❌ 错误的老代码：
+//         * ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_CFG, 0x3F); // 开启了全部 High 和 Low 监听
+//         */
+//
+//     /*  正确的代码：写入 0x2A (二进制 0010 1010)
+//      *  Bit 5 (ZHIE) = 1
+//      *  Bit 3 (YHIE) = 1
+//      *  Bit 1 (XHIE) = 1
+//      *  其余位（包括所有 Low 监听 XLIE/YLIE/ZLIE）全部保持 0！
+//      */
+//     ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_CFG, 0x2A);
+//     if (ret < 0) return ret;
+//
+//     // ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_THS, 0x20);
+//     // if (ret < 0) return ret;
+//
+//     /* 6. INT1_DURATION: 0 */
+//     ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_DURATION, 0x00);
+//     if (ret < 0) return ret;
+//
+//     /* 💡 核心新增：强制归零高通滤波器 */
+//     /* 通过读取 REFERENCE 寄存器(0x26)，强行让芯片把当前的静态重力当做 0 坐标 baseline */
+//     uint8_t dummy_ref;
+//     ret = lis3dh_reg_read(spi_spec, 0x26, &dummy_ref, 1);
+//     if (ret < 0) return ret;
+//
+//     /* 7. INT1_CFG: 开启 X/Y/Z 高低阈值全监听 */
+//     ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_CFG, 0x3F);
+//     if (ret < 0) return ret;
+//
+//     /* 预读清空标志 */
+//     uint8_t dummy;
+//     lis3dh_clear_interrupt(spi_spec, &dummy);
+//
+//     return 0;
+// }
+
+int lis3dh_init(const struct spi_dt_spec *spi_spec)
 {
     uint8_t who_am_i = 0;
     int ret;
 
-    /* 验证芯片身份 */
-    ret = lis3dh_reg_read(spi_spec, LIS3DH_REG_WHO_AM_I, &who_am_i, 1);
-    if (ret < 0 || (who_am_i != 0x33 && who_am_i != 0x3F))
-    {
+    /* 1. 验证 ID */
+    ret = lis3dh_reg_read(spi_spec, 0x0F, &who_am_i, 1);
+    if (ret < 0 || who_am_i != 0x33) {
         return -ENODEV;
     }
 
-    /* 1. CTRL_REG1: 100Hz 采样率, 开启 X/Y/Z 轴 */
-    ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_CTRL_REG1, 0x57);
-    if (ret < 0) return ret;
+    /* 2. 暴力重置：写入 0x40 到 CTRL_REG5 (0x24)，触发软复位，清空所有残留配置 */
+    lis3dh_reg_write(spi_spec, 0x24, 0x80);
+    k_msleep(50); // 给芯片一点时间完成重启
 
-    /* 2. 修正 CTRL_REG2: 写入 0x09
-     * 开启 FDS(Bit3)=1 和 HP_IA1(Bit0)=1，全面激活中断引擎的高通滤波器 */
-    ret = lis3dh_reg_write(spi_spec, 0x21, 0x09);
-    if (ret < 0) return ret;
+    /* 3. CTRL_REG1: 100Hz, 开启 X/Y/Z 轴 */
+    lis3dh_reg_write(spi_spec, 0x20, 0x57);
 
-    /* 3. CTRL_REG3: 将 IA1 信号路由到物理 INT1 引脚 */
-    ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_CTRL_REG3, 0x40);
-    if (ret < 0) return ret;
+    /* 4. CTRL_REG2: 开启高通滤波路由到中断1，过滤重力 */
+    lis3dh_reg_write(spi_spec, 0x21, 0x09);
 
-    /* 4. CTRL_REG5: 开启 LIR1 中断锁存，确保 STM32 不漏信号 */
-    ret = lis3dh_reg_write(spi_spec, 0x24, 0x08);
-    if (ret < 0) return ret;
+    /* 5. CTRL_REG3: IA1 路由到物理 INT1 */
+    lis3dh_reg_write(spi_spec, 0x22, 0x40);
 
-    /* 5. INT1_THS: 设定阈值为 0x12 (约 288mg) */
-    /**
-     *日志里读取到的 Interrupt Source: 0x55 意味着芯片自身的 X/Y/Z 三个轴在高通滤波后依然同时超标。有些面包板的电源纹波或者芯片高通滤波器的初始噪声较大，0x12（288mg）可能还是有些低。我们把阈值提高到 0x20（约 512mg，大约半个重力加速度）
-     */
-    /* ❌ 错误的老代码：
-        * ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_CFG, 0x3F); // 开启了全部 High 和 Low 监听
-        */
+    /* 6. CTRL_REG5: 开启锁存(LIR1) */
+    lis3dh_reg_write(spi_spec, 0x24, 0x08);
 
-    /*  正确的代码：写入 0x2A (二进制 0010 1010)
-     *  Bit 5 (ZHIE) = 1
-     *  Bit 3 (YHIE) = 1
-     *  Bit 1 (XHIE) = 1
-     *  其余位（包括所有 Low 监听 XLIE/YLIE/ZLIE）全部保持 0！
-     */
-    ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_CFG, 0x2A);
-    if (ret < 0) return ret;
+    /* 7. 关键：INT1_THS 设置阈值 */
+    lis3dh_reg_write(spi_spec, 0x32, 0x20);
 
-    // ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_THS, 0x20);
-    // if (ret < 0) return ret;
+    /* 8. 关键：INT1_CFG 只开启 High 事件 (0x2A) */
+    lis3dh_reg_write(spi_spec, 0x30, 0x2A);
 
-    /* 6. INT1_DURATION: 0 */
-    ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_DURATION, 0x00);
-    if (ret < 0) return ret;
-
-    /* 💡 核心新增：强制归零高通滤波器 */
-    /* 通过读取 REFERENCE 寄存器(0x26)，强行让芯片把当前的静态重力当做 0 坐标 baseline */
-    uint8_t dummy_ref;
-    ret = lis3dh_reg_read(spi_spec, 0x26, &dummy_ref, 1);
-    if (ret < 0) return ret;
-
-    /* 7. INT1_CFG: 开启 X/Y/Z 高低阈值全监听 */
-    ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_CFG, 0x3F);
-    if (ret < 0) return ret;
-
-    /* 预读清空标志 */
+    /* 9. 强制清空一次中断状态，确保开机时 INT1 引脚是 0V */
     uint8_t dummy;
     lis3dh_clear_interrupt(spi_spec, &dummy);
 

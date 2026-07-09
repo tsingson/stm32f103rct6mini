@@ -25,6 +25,13 @@ void int1_gpio_isr(const struct device* dev, struct gpio_callback* cb, uint32_t 
 int main(void)
 {
     k_msleep(500);
+
+
+
+
+
+
+
     int ret;
     uint8_t int_src = 0;
 
@@ -45,6 +52,17 @@ int main(void)
 
     // 2. 核心关键：让子弹飞一会儿！静止等待 200ms，让高通滤波器彻底“吃掉”并稳定地球重力
     k_msleep(200);
+
+    uint8_t who_am_i = 0;
+   ret =  lis3dh_reg_read(&spi_dev, 0x0F, &who_am_i, 1);
+
+    if (ret < 0) {
+        printk("LIS3DSH WHO_AM_I read failed: %d\n", ret);
+        return ret;
+    } else
+    {
+        printk("LIS3DSH WHO_AM_I: 0x%02X\n", who_am_i);
+    }
 
     // 3. 稳准狠：此时传感器已完全稳定，执行校准，扣除重力基准并强行释放 INT1 高电平
     ret = lis3dh_reset_baseline(&spi_dev);
