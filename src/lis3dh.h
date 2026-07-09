@@ -17,25 +17,25 @@
 /**
  * @brief 初始化 LIS3DH 并配置为运动唤醒中断模式
  */
-int lis3dh_init(const struct spi_dt_spec *spi_spec);
+int lis3dh_init(const struct spi_dt_spec* spi_spec);
 
 /**
  * @brief 通用寄存器读取
  */
-int lis3dh_reg_read(const struct spi_dt_spec *spi_spec, uint8_t reg, uint8_t *data, size_t len);
+int lis3dh_reg_read(const struct spi_dt_spec* spi_spec, uint8_t reg, uint8_t* data, size_t len);
 
 /**
  * @brief 通用寄存器写入
  */
-int lis3dh_reg_write(const struct spi_dt_spec *spi_spec, uint8_t reg, uint8_t data);
+int lis3dh_reg_write(const struct spi_dt_spec* spi_spec, uint8_t reg, uint8_t data);
 
 /**
  * @brief 读取 INT1_SRC 寄存器以清除中断锁存
  */
-int lis3dh_clear_interrupt(const struct spi_dt_spec *spi_spec, uint8_t *src);
+int lis3dh_clear_interrupt(const struct spi_dt_spec* spi_spec, uint8_t* src);
 
 /* 刷新高通滤波器基准，将当前状态归零，并清空历史中断锁存 */
-int lis3dh_reset_baseline(const struct spi_dt_spec *spi_spec);
+int lis3dh_reset_baseline(const struct spi_dt_spec* spi_spec);
 //
 int lis3dh_read_xyz(const struct spi_dt_spec* spi_spec, int16_t* x, int16_t* y, int16_t* z);
 #endif /* LIS3DH_H */

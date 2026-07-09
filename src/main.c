@@ -1,9 +1,12 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/sys/printk.h>
+#include <zephyr/drivers/spi.h>
+#include <stdio.h>
 #include "lis3dh.h"
+#include "walk.h"
 
+/* 采样率匹配：行走频率通常低于 3Hz，25Hz 采样率 (40ms 间隔) 是兼顾功耗与精度的黄金选项 */
+#define SAMPLING_RATE_MS    (40)
 #define LIS3DH_NODE DT_NODELABEL(lis3dsh)
 
 static const struct spi_dt_spec spi_dev = SPI_DT_SPEC_GET(LIS3DH_NODE,
@@ -22,10 +25,16 @@ void int1_gpio_isr(const struct device* dev, struct gpio_callback* cb, uint32_t 
     k_sem_give(&motion_sem);
 }
 
+
 int main(void)
 {
     k_msleep(500);
-
+    //
+    int16_t x_raw = 0;
+    int16_t y_raw = 0;
+    int16_t z_raw = 0;
+    uint32_t total_steps = 0;
+    //
 
     int ret;
     uint8_t int_src = 0;
@@ -70,7 +79,6 @@ int main(void)
         return 0;
     }
 
-
     /* 💡 核心新增：让高通滤波器飞一会儿（等待 100ms 彻底滤除重力分量） */
     k_msleep(500);
 
@@ -84,40 +92,52 @@ int main(void)
     gpio_pin_configure_dt(&int1_gpio, GPIO_INPUT | GPIO_PULL_DOWN);
 
     /* 保持不变, 在收到高电平时, 触发一个硬件中断 */
-    gpio_pin_interrupt_configure_dt(&int1_gpio, GPIO_INT_EDGE_TO_ACTIVE);
+    // gpio_pin_interrupt_configure_dt(&int1_gpio, GPIO_INT_EDGE_TO_ACTIVE);
     // 设置中断回调函数
-    gpio_init_callback(&int1_cb_data, int1_gpio_isr, BIT(int1_gpio.pin));
-    gpio_add_callback(int1_gpio.port, &int1_cb_data);
+    // gpio_init_callback(&int1_cb_data, int1_gpio_isr, BIT(int1_gpio.pin));
+    // gpio_add_callback(int1_gpio.port, &int1_cb_data);
     //
 
     printk("System Silent. STM32 is sleeping... Tap/Move the board now!\n");
+    //
+    printf("LIS3DH 硬件初始化成功，进入计步核心监测循环...\n");
 
-    int count = 0;
+    /* 4. 实例化并初始化纯整数计步器运行上下文
+     * 参数含义：上下文指针, 量程(2代表±2g), 波动阈值(300 LSB), 迈步最小安全间隔(300ms)
+     */
+    walk_pedometer_t my_pedometer;
+    walk_pedometer_init(&my_pedometer, 2, 300, 300);
+
+    /* 5. 刷新高通滤波器，清空可能存在的前置历史干扰 */
+    lis3dh_reset_baseline(&spi_dev);
+
+    /* 6. 核心轮询采样与计步状态机处理 */
     while (1)
     {
-        /* STM32 在此内核信号量处完全挂起休眠，0% CPU 占用 */
-        k_sem_take(&motion_sem, K_FOREVER);
-        //
-        k_sem_reset(&motion_sem);
-        k_msleep(300);
-
-        /* 瞬间清空中断锁存，允许下一次中断触发 */
-        lis3dh_clear_interrupt(&spi_dev, &int_src);
-        k_msleep(300);
-        /* 触发时仅打印单行日志 */
-        printk("%d Sensor woke up STM32. (Interrupt Source: 0x%02X)\n", count, int_src);
-
-        /* 顺便打印一下触发时的即时数据 */
-
-        int16_t x, y, z;
-        if (lis3dh_read_xyz(&spi_dev, &x, &y, &z) == 0)
+        /* 使用给定的头文件 API 直接读取三轴 16 位原始 ADC 寄存器值 */
+        ret = lis3dh_read_xyz(&spi_dev, &x_raw, &y_raw, &z_raw);
+        if (ret == 0)
         {
-            printk("   Accel Data -> X: %d | Y: %d | Z: %d\n", x, y, z);
+            /* 获取符合 C17 约束的 Zephyr 系统毫秒时间戳 */
+            int64_t now_ms = k_uptime_get();
+
+            /* 调用纯整数极致加速算法：内部执行快速开方与数据平滑处理 */
+            /* 之前：if (walk_pedometer_process(&my_pedometer, &x_raw, &y_raw, &z_raw, now_ms)) */
+            /* 现在：直接传值，更快更安全 */
+            if (walk_pedometer_process(&my_pedometer, x_raw, y_raw, z_raw, now_ms))
+            {
+                total_steps++;
+                printf("[SPI WALK] 步数 +1！当前总数: %u\n", total_steps);
+            }
+        }
+        else
+        {
+            printf("警告: 从 LIS3DH 读取三轴加速度数据失败 (错误码: %d)\n", ret);
         }
 
-
-        /* 800ms 防抖，防止手拿放过程中连续弹出一堆日志 */
-        k_msleep(800);
-        count++;
+        /* 维持 25Hz 的高定时精度 */
+        k_msleep(SAMPLING_RATE_MS);
     }
+
+    return 0;
 }

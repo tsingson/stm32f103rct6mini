@@ -100,14 +100,14 @@ int lis3dh_reset_baseline(const struct spi_dt_spec* spi_spec)
     return lis3dh_clear_interrupt(spi_spec, &dummy);
 }
 
- int lis3dh_read_xyz(const struct spi_dt_spec* spi_spec, int16_t* x, int16_t* y, int16_t* z)
+int lis3dh_read_xyz(const struct spi_dt_spec* spi_spec, int16_t* x, int16_t* y, int16_t* z)
 {
     uint8_t axis_data[6];
     if (lis3dh_reg_read(spi_spec, LIS3DH_REG_OUT_X_L, axis_data, 6) == 0)
     {
-         *x = ((int16_t)((axis_data[1] << 8) | axis_data[0]));
-         *y = ((int16_t)((axis_data[3] << 8) | axis_data[2]));
-         *z = ((int16_t)((axis_data[5] << 8) | axis_data[4]));
+        *x = ((int16_t)((axis_data[1] << 8) | axis_data[0]));
+        *y = ((int16_t)((axis_data[3] << 8) | axis_data[2]));
+        *z = ((int16_t)((axis_data[5] << 8) | axis_data[4]));
         // printk("   Accel Data -> X: %d | Y: %d | Z: %d\n", x, y, z);
         return 0;
     }
