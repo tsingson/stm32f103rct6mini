@@ -3,53 +3,51 @@
 # LIS3DH walk 步行测试
 
 ```
- 
  #include <zephyr/kernel.h>
 #include <zephyr/device.h>
-#include <zephyr/drivers/i2c.h>
 #include <stdio.h>
+#include "lis3dh.h"
 #include "walk.h"
 
-/* 直接通过设备树获取 I2C 总线设备 */
-const struct device *const i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
-#define LIS3DH_I2C_ADDR  0x18  /* 芯片 I2C 地址 */
-#define OUT_X_L          0x28  /* 数据寄存器起始地址，最高位置 1 支持自增读取 */
-#define READ_CMD         (OUT_X_L | 0x80) 
+#define SAMPLING_RATE_MS    (40)
+static const struct spi_dt_spec lis3dh_spi = SPI_DT_SPEC_GET(DT_NODELABEL(lis3dh), SPI_OP_MODE_MASTER | SPI_WORD_SET(8), 0);
 
 int main(void) {
-    uint8_t raw_data[6];
-    int16_t x_raw, y_raw, z_raw;
-    uint32_t total_steps = 0;
+    int16_t x_raw = 0;
+    int16_t y_raw = 0;
+    int16_t z_raw = 0;
+    uint32_t total_steps = 0U;
+    uint32_t steps_inc = 0U;
 
-    walk_pedometer_t my_pedometer;
-    /* 初始化：量程±2g，计步波动阈值 300 LSB，防抖 300ms */
-    walk_pedometer_init(&my_pedometer, 2, 300, 300);
-
-    if (!device_is_ready(i2c_dev)) {
-        printf("I2C 设备未就绪\n");
-        return -1;
+    if (!spi_is_ready_dt(&lis3dh_spi)) {
+        return -EINVAL;
+    }
+    if (lis3dh_init(&lis3dh_spi) < 0) {
+        return -EIO;
     }
 
-    // TODO: 外部在此处配置 LIS3DH 的寄存器（如 CTRL_REG1=0x37 启用 ODR 25Hz）
+    walk_pedometer_t my_pedometer;
+    walk_pedometer_init(&my_pedometer, 2, 300, 300);
+    lis3dh_reset_baseline(&lis3dh_spi);
 
     while (1) {
-        /* 快速低开销地直接读取 6 字节原始数据 */
-        if (i2c_burst_read(i2c_dev, LIS3DH_I2C_ADDR, READ_CMD, raw_data, 6) == 0) {
-            
-            /* C17 标准下安全的原始字节拼接 */
-            x_raw = (int16_t)((raw_data[1] << 8) | raw_data[0]);
-            y_raw = (int16_t)((raw_data[3] << 8) | raw_data[2]);
-            z_raw = (int16_t)((raw_data[5] << 8) | raw_data[4]);
-
-            /* 调用纯整数快速算法 */
+        /* 完全信任并在内部传递指针，不进行外部重复拼接 */
+        if (lis3dh_read_xyz(&lis3dh_spi, &x_raw, &y_raw, &z_raw) == 0) {
             int64_t now_ms = k_uptime_get();
-            if (walk_pedometer_process(&my_pedometer, &x_raw, &y_raw, &z_raw, now_ms)) {
-                total_steps++;
-                printf("[FAST WALK] 步数 +1！当前总数: %u\n", total_steps);
+
+            /* 参数值传递：安全传递 x_raw, y_raw, z_raw 副本 */
+            (void)walk_pedometer_process(&my_pedometer, x_raw, y_raw, z_raw, now_ms, &steps_inc);
+
+            if (steps_inc > 0U) {
+                total_steps += steps_inc;
+                if (steps_inc == WALK_REQUIRED_STEPS) {
+                    printf("[WALK TRIGGER] 连续走满4步激活！追加4步。当前总数: %u\n", total_steps);
+                } else {
+                    printf("[WALK] 实时计步。当前总数: %u\n", total_steps);
+                }
             }
         }
-
-        k_msleep(40); /* 对应 25Hz 采样率 */
+        k_msleep(SAMPLING_RATE_MS);
     }
     return 0;
 }
