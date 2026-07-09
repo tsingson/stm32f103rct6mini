@@ -5,15 +5,13 @@
 #include "lis3dh.h"
 #include "walk.h"
 
-/* 采样率匹配：行走频率通常低于 3Hz，25Hz 采样率 (40ms 间隔) 是兼顾功耗与精度的黄金选项 */
 #define SAMPLING_RATE_MS    (40)
-#define LIS3DH_NODE DT_NODELABEL(lis3dsh)
+#define LIS3DH_NODE         DT_NODELABEL(lis3dsh)
 
 static const struct spi_dt_spec spi_dev = SPI_DT_SPEC_GET(LIS3DH_NODE,
                                                           SPI_WORD_SET(8) | SPI_TRANSFER_MSB,
                                                           0);
 
-/* 方案 2 的 zephyr,user 路径获取引脚 */
 static const struct gpio_dt_spec int1_gpio =
     GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), sensor_irq_gpios);
 
@@ -22,24 +20,32 @@ static struct gpio_callback int1_cb_data;
 
 void int1_gpio_isr(const struct device* dev, struct gpio_callback* cb, uint32_t pins)
 {
+    /* 显式消除未定义变量警告 */
+    (void)dev;
+    (void)cb;
+    (void)pins;
     k_sem_give(&motion_sem);
 }
 
-
 int main(void)
 {
-    k_msleep(500);
-    //
     int16_t x_raw = 0;
     int16_t y_raw = 0;
     int16_t z_raw = 0;
     uint32_t total_steps = 0U;
     uint32_t steps_inc = 0U;
-    //
-
     int ret;
     uint8_t int_src = 0;
+    uint8_t who_am_i = 0;
+    walk_pedometer_t my_pedometer;
 
+    /* 集中收拢老人调优变量 */
+    uint32_t elderly_threshold = 180U;
+    uint32_t elderly_debounce  = 400U;
+    uint32_t elderly_timeout   = 4000U;
+    uint32_t log_counter = 0U;
+
+    k_msleep(500);
     printk("\n--- LIS3DH Perfect Wake-On-Motion Test ---\n");
 
     if (!spi_is_ready_dt(&spi_dev) || !gpio_is_ready_dt(&int1_gpio))
@@ -48,7 +54,6 @@ int main(void)
         return 0;
     }
 
-    // 1. 初始化 LIS3DH 寄存器配置（此时传感器开始通电，滤波器开始工作）
     ret = lis3dh_init(&spi_dev);
     if (ret < 0)
     {
@@ -56,12 +61,8 @@ int main(void)
         return 0;
     }
 
-    // 2. 核心关键：让子弹飞一会儿！静止等待 200ms，让高通滤波器彻底“吃掉”并稳定地球重力
     k_msleep(200);
-
-    uint8_t who_am_i = 0;
     ret = lis3dh_reg_read(&spi_dev, 0x0F, &who_am_i, 1);
-
     if (ret < 0)
     {
         printk("LIS3DSH WHO_AM_I read failed: %d\n", ret);
@@ -72,7 +73,6 @@ int main(void)
         printk("LIS3DSH WHO_AM_I: 0x%02X\n", who_am_i);
     }
 
-    // 3. 稳准狠：此时传感器已完全稳定，执行校准，扣除重力基准并强行释放 INT1 高电平
     ret = lis3dh_reset_baseline(&spi_dev);
     if (ret < 0)
     {
@@ -80,59 +80,67 @@ int main(void)
         return 0;
     }
 
-    /* 💡 核心新增：让高通滤波器飞一会儿（等待 100ms 彻底滤除重力分量） */
     k_msleep(500);
-
-    /* 💡 核心新增：再清空一次可能残留的初始中断 */
     lis3dh_clear_interrupt(&spi_dev, &int_src);
-
-    /* 随后再配置并开启 STM32 的 GPIO 中断监听 */
-    gpio_pin_configure_dt(&int1_gpio, GPIO_INPUT);
-
-    /* 核心修改：增加 GPIO_PULL_DOWN，防止引脚浮空和断线时误触发 */
     gpio_pin_configure_dt(&int1_gpio, GPIO_INPUT | GPIO_PULL_DOWN);
 
-    /* 保持不变, 在收到高电平时, 触发一个硬件中断 */
-    // gpio_pin_interrupt_configure_dt(&int1_gpio, GPIO_INT_EDGE_TO_ACTIVE);
-    // 设置中断回调函数
-    // gpio_init_callback(&int1_cb_data, int1_gpio_isr, BIT(int1_gpio.pin));
-    // gpio_add_callback(int1_gpio.port, &int1_cb_data);
-    //
-
     printk("System Silent. STM32 is sleeping... Tap/Move the board now!\n");
-    //
     printf("LIS3DH 硬件初始化成功，进入计步核心监测循环...\n");
 
-    /* 4. 实例化并初始化纯整数计步器运行上下文
-     * 参数含义：上下文指针, 量程(2代表±2g), 波动阈值(300 LSB), 迈步最小安全间隔(300ms)
-     */
-    walk_pedometer_t my_pedometer;
-    walk_pedometer_init(&my_pedometer, 2, 300, 300);
-
-    /* 5. 刷新高通滤波器，清空可能存在的前置历史干扰 */
+    walk_pedometer_init(&my_pedometer, 2, elderly_threshold, elderly_debounce, elderly_timeout);
     lis3dh_reset_baseline(&spi_dev);
-
 
     while (1)
     {
-        /* 完全信任并在内部传递指针，不进行外部重复拼接 */
         if (lis3dh_read_xyz(&spi_dev, &x_raw, &y_raw, &z_raw) == 0)
         {
             int64_t now_ms = k_uptime_get();
+            bool is_walking = walk_pedometer_process(&my_pedometer, x_raw, y_raw, z_raw, now_ms, &steps_inc);
 
-            /* 参数值传递：安全传递 x_raw, y_raw, z_raw 副本 */
-            (void)walk_pedometer_process(&my_pedometer, x_raw, y_raw, z_raw, now_ms, &steps_inc);
+            log_counter++;
+            if (log_counter % 5U == 0U) {
+                /* 修正：将计算开方和滤波均值的代码块变量全部规范隔离，严防 C17 混合作用域警告 */
+                uint32_t ux = (x_raw < 0) ? (uint32_t)(-x_raw) : (uint32_t)x_raw;
+                uint32_t uy = (y_raw < 0) ? (uint32_t)(-y_raw) : (uint32_t)y_raw;
+                uint32_t uz = (z_raw < 0) ? (uint32_t)(-z_raw) : (uint32_t)z_raw;
+                uint32_t v_val = (ux * ux) + (uy * uy) + (uz * uz);
+                uint32_t bit = 1U << 30;
+                uint32_t res = 0U;
+                uint32_t high_bound = my_pedometer.gravity_base + my_pedometer.step_threshold;
+
+                while (bit > v_val) {
+                    bit >>= 2;
+                }
+                while (bit != 0U) {
+                    if (v_val >= res + bit) {
+                        v_val -= res + bit;
+                        res = (res >> 1) + bit;
+                    } else {
+                        res >>= 1;
+                    }
+                    bit >>= 2;
+                }
+
+                printf("[DEBUG_WAVE] 原始值:%u, 滤波值:%d, 触发门槛:%u, 缓冲池步数:%u, 行走激活状态:%d\n",
+                       res,
+                       (int)(my_pedometer.filter_sum / (int32_t)FILTER_WINDOW_SIZE),
+                       high_bound,
+                       my_pedometer.continuous_steps,
+                       is_walking);
+            }
 
             if (steps_inc > 0U)
             {
                 total_steps += steps_inc;
-                if (steps_inc == WALK_REQUIRED_STEPS)
+                /* 修正：通过显式接口比对或统一强强类型比对，防止解耦破缺 */
+                if (steps_inc == (uint32_t)WALK_REQUIRED_STEPS)
                 {
-                    printf("[WALK TRIGGER] 连续走满4步激活！追加4步。当前总数: %u\n", total_steps);
+                    printf("\n🚀🚀🚀 [WALK TRIGGER SUCCESS] 连续走满 %u 步激活！追加追偿步数。当前总步数: %u\n\n",
+                           WALK_REQUIRED_STEPS, total_steps);
                 }
                 else
                 {
-                    printf("[WALK] 实时计步。当前总数: %u\n", total_steps);
+                    printf("🚶 [WALK CONTINUOUS] 步态持续中，实时计步 +1。当前总步数: %u\n", total_steps);
                 }
             }
         }
