@@ -2,12 +2,18 @@
 #include <stddef.h>
 
 static inline uint32_t walk_isqrt(uint32_t val) {
-    uint32_t res = 0;
+    uint32_t res = 0U;
     uint32_t bit = 1U << 30;
-    while (bit > val) { bit >>= 2; }
-    while (bit != 0) {
-        if (val >= res + bit) { val -= res + bit; res = (res >> 1) + bit; }
-        else { res >>= 1; }
+    while (bit > val) {
+        bit >>= 2;
+    }
+    while (bit != 0U) {
+        if (val >= res + bit) {
+            val -= res + bit;
+            res = (res >> 1) + bit;
+        } else {
+            res >>= 1;
+        }
         bit >>= 2;
     }
     return res;
@@ -18,28 +24,36 @@ static inline int32_t walk_moving_average(walk_pedometer_t *ctx, int32_t new_val
     ctx->filter_buffer[ctx->filter_index] = new_val;
     ctx->filter_sum += new_val;
     ctx->filter_index = (ctx->filter_index + 1) % FILTER_WINDOW_SIZE;
-    return ctx->filter_sum / FILTER_WINDOW_SIZE;
+    /* 修正：显式强转除数，消除隐式符号类型转换隐患 */
+    return ctx->filter_sum / (int32_t)FILTER_WINDOW_SIZE;
 }
 
-void walk_pedometer_init(walk_pedometer_t *ctx, uint8_t range_g, uint32_t threshold_lsb, uint32_t delay_ms) {
-    if (ctx == NULL) return;
+void walk_pedometer_init(walk_pedometer_t *ctx, uint8_t range_g, uint32_t threshold_lsb, uint32_t delay_ms, uint32_t timeout_ms) {
+    if (ctx == NULL) {
+        return;
+    }
 
-    for (int i = 0; i < FILTER_WINDOW_SIZE; i++) ctx->filter_buffer[i] = 0;
+    for (int i = 0; i < FILTER_WINDOW_SIZE; i++) {
+        ctx->filter_buffer[i] = 0;
+    }
     ctx->filter_index = 0;
     ctx->filter_sum = 0;
 
     ctx->is_above_threshold = false;
-    ctx->last_step_time_ms = -1LL; /* 使用 -1LL 标定无前序迈步，规避系统启动 0 时间戳逻辑死角 */
+    ctx->last_step_time_ms = -1LL;
     ctx->continuous_steps = 0U;
     ctx->is_active = false;
 
     ctx->step_threshold = threshold_lsb;
     ctx->step_delay_ms = delay_ms;
-    ctx->gravity_base = (range_g == 4) ? 2048U : 4096U;
+    ctx->walk_timeout_ms = timeout_ms;
+    ctx->gravity_base = (range_g == 4U) ? 2048U : 4096U;
 }
 
 bool walk_pedometer_process(walk_pedometer_t *ctx, int16_t x, int16_t y, int16_t z, int64_t current_time_ms, uint32_t *steps_to_add) {
-    if (ctx == NULL || steps_to_add == NULL) return false;
+    if (ctx == NULL || steps_to_add == NULL) {
+        return false;
+    }
 
     *steps_to_add = 0U;
 
@@ -51,19 +65,17 @@ bool walk_pedometer_process(walk_pedometer_t *ctx, int16_t x, int16_t y, int16_t
     int32_t vmx = (int32_t)walk_isqrt(sum_squares);
     int32_t vmx_filtered = walk_moving_average(ctx, vmx);
 
-    /* 强转为无符号进行安全比较，避免 C17 下的有符号回绕未定义行为 */
     uint32_t u_vmx_filtered = (vmx_filtered < 0) ? 0U : (uint32_t)vmx_filtered;
 
     /* 断步超时检测 */
     if (ctx->last_step_time_ms != -1LL) {
         int64_t idle_diff = current_time_ms - ctx->last_step_time_ms;
-        if (idle_diff > (int64_t)WALK_TIMEOUT_MS) {
+        if (idle_diff > (int64_t)ctx->walk_timeout_ms) {
             ctx->continuous_steps = 0U;
             ctx->is_active = false;
         }
     }
 
-    /* 阈值边界全程采用纯无符号域运算 */
     uint32_t high_bound = ctx->gravity_base + ctx->step_threshold;
     uint32_t low_bound  = ctx->gravity_base + (ctx->step_threshold / 2U);
 
@@ -81,7 +93,7 @@ bool walk_pedometer_process(walk_pedometer_t *ctx, int16_t x, int16_t y, int16_t
                     ctx->continuous_steps++;
                     if (ctx->continuous_steps >= WALK_REQUIRED_STEPS) {
                         ctx->is_active = true;
-                        *steps_to_add = WALK_REQUIRED_STEPS;
+                        *steps_to_add = (uint32_t)WALK_REQUIRED_STEPS;
                     }
                 }
             }

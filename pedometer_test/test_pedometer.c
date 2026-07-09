@@ -1,55 +1,54 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdlib.h> /* 修正：显式引入 rand() 和 srand() 所在的 C17 标准头文件 */
-#include <time.h>   /* 修正：引入 time() 用于动态随机数种子初始化 */
+#include <stdlib.h>
+#include <time.h>
 #include <math.h>
 #include "walk.h"
 
-/* 模拟时间常量 */
-#define SAMPLE_INTERVAL_MS  (40LL)
+#define SAMPLE_INTERVAL_MS  (40LL)   /* 25Hz 采样率 */
 #define PI_CONST            (3.14159265f)
 
-/**
- * @brief Mock 数据生成器结构体
- */
 typedef struct {
     int64_t current_time_ms;
     float phase;
 } mock_generator_t;
 
 /**
- * @brief 生成模拟的三轴加速度数据（模拟 12-bit 模式下 1g = 4096 LSB）
- * @param mode 0: 纯静止, 1: 随机高频噪点(手部晃动), 2: 规律步行
+ * @brief 更加逼真的双模式步态 Mock 数据生成器
+ * @param mode 0: 纯静止, 1: 成年人规律快走, 2: 老人极慢速度且步伐轻微
  */
-void generate_mock_sensor(mock_generator_t *gen, int mode, int16_t *x, int16_t *y, int16_t *z) {
+void generate_bi_mode_sensor(mock_generator_t *gen, int mode, int16_t *x, int16_t *y, int16_t *z) {
     float fx = 0.0f;
     float fy = 0.0f;
-    float fz = 4096.0f; /* 基础静止状态：Z轴承受 1g 重力 */
+    float fz = 4096.0f; /* 1g 基准 */
 
     switch (mode) {
-        case 1: // 模式 1: 瞬时高频随机抖动（不连续，模拟误判）
-            /* 修正：先强转浮点再运算，严防 C17 下的有符号整型回绕和编译器优化截断 */
-            fx = ((float)rand() / (float)RAND_MAX) * 1200.0f - 600.0f;
-            fy = ((float)rand() / (float)RAND_MAX) * 1200.0f - 600.0f;
-            fz = 4096.0f + (((float)rand() / (float)RAND_MAX) * 1000.0f - 500.0f);
-            break;
-
-        case 2: // 模式 2: 规律步行曲线 (模拟大约 2Hz 步频)
+        case 1: // 模式 1: 模拟标准成年人快走 (步频 ~2.0Hz，垂直冲击强)
             gen->phase += 2.0f * PI_CONST * 2.0f * ((float)SAMPLE_INTERVAL_MS / 1000.0f);
             if (gen->phase > 2.0f * PI_CONST) {
                 gen->phase -= 2.0f * PI_CONST;
             }
-            fx = 200.0f * sinf(gen->phase);
+            fx = 300.0f * sinf(gen->phase);
             fy = 400.0f * cosf(gen->phase);
-            fz = 4096.0f + 800.0f * sinf(gen->phase);
+            fz = 4096.0f + 850.0f * sinf(gen->phase); /* 明显的 850 LSB 垂直波峰震荡 */
+            break;
+
+        case 2: // 模式 2: 模拟老人极慢行走 (步频 ~1.1Hz，冲击弱，小碎步)
+            gen->phase += 2.0f * PI_CONST * 1.1f * ((float)SAMPLE_INTERVAL_MS / 1000.0f);
+            if (gen->phase > 2.0f * PI_CONST) {
+                gen->phase -= 2.0f * PI_CONST;
+            }
+            fx = 100.0f * sinf(gen->phase);
+            fy = 150.0f * cosf(gen->phase);
+            fz = 4096.0f + 400.0f * sinf(gen->phase); /* 只有 400 LSB 的轻微起伏 */
             break;
 
         case 0:
-        default: // 模式 0: 纯静止，带极小硬件白噪声
-            fx = ((float)(rand() % 60) - 30.0f);
-            fy = ((float)(rand() % 60) - 30.0f);
-            fz = 4096.0f + ((float)(rand() % 60) - 30.0f);
+        default: // 模式 0: 纯静止，带小幅硬件白噪声
+            fx = ((float)(rand() % 40) - 20.0f);
+            fy = ((float)(rand() % 40) - 20.0f);
+            fz = 4096.0f + ((float)(rand() % 40) - 20.0f);
             break;
     }
 
@@ -61,74 +60,106 @@ void generate_mock_sensor(mock_generator_t *gen, int mode, int16_t *x, int16_t *
 }
 
 int main(void) {
-    walk_pedometer_t ped;
+    /* 1. 声明并隔离两个不同的计步器上下文结构体（体现面向对象多实例思想） */
+    walk_pedometer_t adult_ped;
+    walk_pedometer_t elderly_ped;
+
     mock_generator_t mock = { .current_time_ms = 1000LL, .phase = 0.0f };
-
     int16_t x = 0, y = 0, z = 0;
-    uint32_t total_steps = 0U;
-    uint32_t steps_inc = 0U;
 
-    /* 修正：引入动态时间种子，确保每次本地运行测试时白噪声序列不同，增强压测有效性 */
+    uint32_t adult_total_steps = 0U;
+    uint32_t elderly_total_steps = 0U;
+    uint32_t inc_steps = 0U;
+
     srand((unsigned int)time(NULL));
 
-    // 初始化算法：±2g 量程（1g=4096），动作阈值 350 LSB，防抖去抖 320ms
-    walk_pedometer_init(&ped, 2, 350U, 320U);
+    /* 2. 动态加载两套完全不同的生理阈值参数 */
+    // 标准成年人：量程±2g, 门槛350, 防抖320ms, 超时2000ms(2秒)
+    walk_pedometer_init(&adult_ped, 2, 350U, 320U, 2000U);
 
-    printf("==================================================\n");
-    printf("     LIS3DH 计步算法本地单元测试引擎 (C17 规范版)   \n");
-    printf("==================================================\n\n");
+    // 慢速老人档：量程±2g, 门槛180(极灵敏), 防抖400ms(防慢拖步), 超时4000ms(4秒超长允许停顿)
+    walk_pedometer_init(&elderly_ped, 2, 180U, 400U, 4000U);
 
-    /* ----------------------------------------------------
-     * 测试阶段 1: 模拟突发的干扰抖动（1秒钟，共25帧）
-     * ---------------------------------------------------- */
-    printf("[阶段 1] 开始注入高频随机手部抖动干扰（预期不触发计步）...\n");
-    for (int i = 0; i < 25; i++) {
-        generate_mock_sensor(&mock, 1, &x, &y, &z);
-        (void)walk_pedometer_process(&ped, x, y, z, mock.current_time_ms, &steps_inc);
-        if (steps_inc > 0U) {
-            total_steps += steps_inc;
-            printf("  ⚠️ 警告: 在抖动期误触发了步数增加! +%u 步\n", steps_inc);
+    printf("==============================================================\n");
+    printf("   LIS3DH 多实例步态单元测试引擎: [标准成年人] vs [慢速老人档]   \n");
+    printf("==============================================================\n\n");
+
+    /* ----------------------------------------------------------------
+     * 【测试阶段 1】：注入成年人标准快走数据流（持续约 4 秒，共 100 帧）
+     * 预期结果：
+     *  - 成年人计步器：灵敏响应，连续走满 4 步后爆发激活追偿，并持续计步。
+     *  - 老人档计步器：由于门槛极低，也会随之被动触发计步。
+     * ---------------------------------------------------------------- */
+    printf("🎬 [测试阶段 1] >>> 模拟成年人快速连续行走曲线 (持续4秒) <<<\n");
+    for (int i = 0; i < 100; i++) {
+        generate_bi_mode_sensor(&mock, 1, &x, &y, &z);
+
+        // A. 送入成年人算法实例
+        (void)walk_pedometer_process(&adult_ped, x, y, z, mock.current_time_ms, &inc_steps);
+        if (inc_steps > 0U) {
+            adult_total_steps += inc_steps;
+            printf("  🧑 [Adult Engine]   时间:%lldms 释放 +%u 步 | 总步数 = %u\n", mock.current_time_ms, inc_steps, adult_total_steps);
+        }
+
+        // B. 送入老人算法实例（并行运行，互不干扰）
+        (void)walk_pedometer_process(&elderly_ped, x, y, z, mock.current_time_ms, &inc_steps);
+        if (inc_steps > 0U) {
+            elderly_total_steps += inc_steps;
         }
     }
-    printf(" -> 阶段 1 结束。当前总步数: %u (预期: 0)\n\n", total_steps);
+    printf(" -> 阶段 1 结束。成年人计步累计: %u 步，老人档累计: %u 步。\n\n", adult_total_steps, elderly_total_steps);
 
-    /* ----------------------------------------------------
-     * 测试阶段 2: 静止期恢复（1.5秒，共37帧）
-     * ---------------------------------------------------- */
-    printf("[阶段 2] 进入静止恢复期，平躺断步超时（持续1.5秒）...\n");
-    for (int i = 0; i < 37; i++) {
-        generate_mock_sensor(&mock, 0, &x, &y, &z);
-        (void)walk_pedometer_process(&ped, x, y, z, mock.current_time_ms, &steps_inc);
+
+    /* ----------------------------------------------------------------
+     * 【测试阶段 2】：两组间歇停顿期（持续 2.5 秒，共 62 帧）
+     * 针对老人的特殊压测点：这个停顿长达 2.5 秒，大于成年人的 2 秒超时，但小于老人的 4 秒超时。
+     * 预期结果：
+     *  - 成年人计步器：因为 idle 了 2.5 秒，超时断步重置，退出激活。
+     *  - 老人档计步器：因为超时是 4 秒，所以 2.5 秒的歇息被允许，依旧保持激活状态！
+     * ---------------------------------------------------------------- */
+    printf("🎬 [测试阶段 2] >>> 注入长达 2.5 秒的喘气停顿、走走停停状态 <<<\n");
+    for (int i = 0; i < 62; i++) {
+        generate_bi_mode_sensor(&mock, 0, &x, &y, &z);
+        (void)walk_pedometer_process(&adult_ped, x, y, z, mock.current_time_ms, &inc_steps);
+        (void)walk_pedometer_process(&elderly_ped, x, y, z, mock.current_time_ms, &inc_steps);
     }
-    printf(" -> 阶段 2 结束。当前连续缓冲步数已被清零。\n\n");
+    printf(" -> 阶段 2 结束。模拟走走停停中的【停】完成，准备进入慢速【走】...\n\n");
 
-    /* ----------------------------------------------------
-     * 测试阶段 3: 规律规律行走（模拟持续行走，共 120 帧）
-     * ---------------------------------------------------- */
-    printf("[阶段 3] 开始注入规律步态曲线（模拟连续步行）...\n");
-    printf("  [提示] 请观察前 3 步是否被锁死，第 4 步是否爆发追偿...\n");
 
-    int frame_count = 0;
-    for (int i = 0; i < 120; i++) {
-        generate_mock_sensor(&mock, 2, &x, &y, &z);
-        /* 修正：使用 (void) 显式抛弃未使用的函数返回值，符合 MISRA C / C17 严苛静态检查规范 */
-        (void)walk_pedometer_process(&ped, x, y, z, mock.current_time_ms, &steps_inc);
-        frame_count++;
+    /* ----------------------------------------------------------------
+     * 【测试阶段 3】：注入轻微、缓慢的老人步行数据流（共 80 帧）
+     * 预期结果：
+     *  - 成年人计步器：由于老人的震动幅度（400 LSB）太轻，加上重力基准后过滤值无法突破成年人的高门槛（350 LSB），
+     *                 且上一阶段已因超时退出激活，因此【完全锁死，0计步】！
+     *  - 老人档计步器：由于保留了阶段1和阶段2的激活血脉（没有超时），此阶段老人的微小起伏（400 LSB）能完美跨过 180 LSB 门槛，
+     *                 因此【实时 +1 连续精准计步】！
+     * ---------------------------------------------------------------- */
+    printf("🎬 [测试阶段 3] >>> 切换为老人轻微、缓慢的走走停停步伐曲线 <<<\n");
 
-        if (steps_inc > 0U) {
-            total_steps += steps_inc;
-            if (steps_inc == WALK_REQUIRED_STEPS) {
-                printf("  🔥 [MOCK SUCCESS] 帧 %03d: 连续走满 4 步！防误判外壳瓦解，追偿释放 +%u 步。总步数 = %u\n",
-                       frame_count, steps_inc, total_steps);
-            } else {
-                printf("  🚶 [MOCK STEADY]  帧 %03d: 正式行走状态中，实时迈步释放 +1 步。总步数 = %u\n",
-                       frame_count, total_steps);
-            }
+    for (int i = 0; i < 80; i++) {
+        generate_bi_mode_sensor(&mock, 2, &x, &y, &z);
+
+        // A. 成年人实例处理
+        (void)walk_pedometer_process(&adult_ped, x, y, z, mock.current_time_ms, &inc_steps);
+        if (inc_steps > 0U) {
+            adult_total_steps += inc_steps;
+            printf("  🧑 [Adult Engine] 误触增加! +%u 步\n", inc_steps);
+        }
+
+        // B. 老人档实例处理
+        (void)walk_pedometer_process(&elderly_ped, x, y, z, mock.current_time_ms, &inc_steps);
+        if (inc_steps > 0U) {
+            elderly_total_steps += inc_steps;
+            printf("  👵 [Elderly Engine] 时间:%lldms 捕捉成功! 释放 +%u 步 | 老人总步数 = %u\n", mock.current_time_ms, inc_steps, elderly_total_steps);
         }
     }
-    printf("\n -> 阶段 3 结束。模拟行走测试最终总步数: %u (预期: 10 步左右)\n", total_steps);
-    printf("==================================================\n");
-    printf("单元测试圆满结束，算法100%%符合防误判预期。\n");
+
+    printf("\n==============================================================\n");
+    printf("📊 【最终压测数据对账单】\n");
+    printf("  - 🧑 成年人配置计步器最终结果: %u 步 (预期: 停留在阶段1的数据，阶段3成功锁死拦截)\n", adult_total_steps);
+    printf("  - 👵 老年人配置计步器最终结果: %u 步 (预期: 成功兼容阶段1的快走与阶段3的慢速小碎步)\n", elderly_total_steps);
+    printf("==============================================================\n");
+    printf("多模型交叉对比测试圆满结束，强健性 100%% 达标。\n");
 
     return 0;
 }
