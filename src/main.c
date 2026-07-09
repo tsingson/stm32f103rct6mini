@@ -101,6 +101,9 @@ int main(void)
     {
         /* STM32 在此内核信号量处完全挂起休眠，0% CPU 占用 */
         k_sem_take(&motion_sem, K_FOREVER);
+        //
+        k_sem_reset(&motion_sem);
+        k_msleep(300);
 
         /* 瞬间清空中断锁存，允许下一次中断触发 */
         lis3dh_clear_interrupt(&spi_dev, &int_src);
