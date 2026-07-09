@@ -108,12 +108,17 @@ int main(void)
         printk("%d Sensor woke up STM32. (Interrupt Source: 0x%02X)\n", count, int_src);
 
         /* 顺便打印一下触发时的即时数据 */
-        uint8_t axis_data[6];
-        if (lis3dh_reg_read(&spi_dev, LIS3DH_REG_OUT_X_L, axis_data, 6) == 0)
+        // uint8_t axis_data[6];
+        // if (lis3dh_reg_read(&spi_dev, LIS3DH_REG_OUT_X_L, axis_data, 6) == 0)
+        // {
+        //     int16_t x = (int16_t)((axis_data[1] << 8) | axis_data[0]);
+        //     int16_t y = (int16_t)((axis_data[3] << 8) | axis_data[2]);
+        //     int16_t z = (int16_t)((axis_data[5] << 8) | axis_data[4]);
+        //     printk("   Accel Data -> X: %d | Y: %d | Z: %d\n", x, y, z);
+        // }
+        int16_t x, y, z;
+        if (lis3dh_read_xyz(&spi_dev, &x, &y, &z) == 0)
         {
-            int16_t x = (int16_t)((axis_data[1] << 8) | axis_data[0]);
-            int16_t y = (int16_t)((axis_data[3] << 8) | axis_data[2]);
-            int16_t z = (int16_t)((axis_data[5] << 8) | axis_data[4]);
             printk("   Accel Data -> X: %d | Y: %d | Z: %d\n", x, y, z);
         }
 
