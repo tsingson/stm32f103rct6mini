@@ -1,10 +1,12 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/display.h>     /* Zephyr 标准显示屏抽象层 */
+#include <zephyr/display/cfb.h>          /* 标准字符帧缓冲区 */
 #include <zephyr/sys/printk.h>
-#include <zephyr/sys/ring_buffer.h> /* 引入 Zephyr 高效官方环形缓冲区 */
+#include <zephyr/sys/ring_buffer.h>
 #include <zephyr/version.h>
 #include <zephyr/pm/pm.h>
-#include <zephyr/pm/policy.h>
+#include <zephyr/pm/policy.h>            /* 引入现代策略锁 API */
 #include <stdio.h>
 #include <string.h>
 
@@ -16,116 +18,136 @@ static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led_user), gpio
 static const struct gpio_dt_spec btn = GPIO_DT_SPEC_GET(DT_ALIAS(button_user), gpios);
 static struct gpio_callback button_cb_data;
 
-/* 线程间同步信号量：当按键处于稳态释放时，通知主线程启动休眠倒计时 */
+static const struct device* display_dev = DEVICE_DT_GET(DT_NODELABEL(ssd1306));
+
 K_SEM_DEFINE(sleep_countdown_sem, 0, 1);
 
-/* ==================== 需求 1 & 2：异步日志 Ring Buffer 模块 ==================== */
-#define LOG_QUEUE_SIZE 32              /* 字符串队列最大支持存储 32 条消息 */
-#define MAX_LOG_STR_LEN 128            /* 每条消息的最大长度 */
-#define PRINT_THREAD_STACK_SIZE 1024
-#define PRINT_THREAD_PRIORITY 10       /* 低优先级打印线程，绝不干扰实时控制 */
+enum tracker_state
+{
+    STATE_0_HEARTBEAT = 0,
+    STATE_1_TRACKING = 1,
+    STATE_3_EMERGENCY = 3,
+    STATE_4_BATTERY_REP = 4
+};
 
-/* 定义单条日志的数据结构 */
-struct log_item {
+static enum tracker_state current_fsm_state = STATE_0_HEARTBEAT;
+
+/* ==================== 异步日志 Ring Buffer 模块 ==================== */
+#define LOG_QUEUE_SIZE 32
+#define MAX_LOG_STR_LEN 128
+#define PRINT_THREAD_STACK_SIZE 1024
+#define PRINT_THREAD_PRIORITY 10
+
+struct log_item
+{
     char str[MAX_LOG_STR_LEN];
 };
 
-/* 静态初始化环形缓冲区，大小为：单条结构体大小 * 容量 */
 RING_BUF_DECLARE(log_ring_buf, sizeof(struct log_item) * LOG_QUEUE_SIZE);
-
-/* 使用自旋锁（Spinlock）确保中断与多线程环境下，改写缓冲区绝对安全且不产生死锁 */
 static struct k_spinlock log_lock;
-
-/* 线程同步条件变量：当缓冲区有新数据时，唤醒打印线程 */
 K_CONDVAR_DEFINE(log_condvar);
 K_MUTEX_DEFINE(log_mutex);
 
-/*
- * 全局安全的自定义打印函数：替代原生阻塞的 printk
- * 支持格式化输入，可在中断、主线程、任意工作线程中无脑调用！
- */
-void safe_log(const char *format, ...)
+void safe_log(const char* format, ...)
 {
     struct log_item item;
     va_list args;
-
     va_start(args, format);
     vsnprintf(item.str, sizeof(item.str), format, args);
     va_end(args);
 
     k_spinlock_key_t key = k_spin_lock(&log_lock);
-
-    /* 检查当前缓冲区剩余可用空间 */
     uint32_t free_space = ring_buf_space_get(&log_ring_buf);
-
-    /* 核心需求 1：如果队列没有消费者导致满了，强制抛弃最老的一条数据，存入最新数据 */
-    if (free_space < sizeof(struct log_item)) {
+    if (free_space < sizeof(struct log_item))
+    {
         struct log_item dummy;
-        /* 腾出一条数据的空间（抛弃最老的） */
-        ring_buf_get(&log_ring_buf, (uint8_t *)&dummy, sizeof(struct log_item));
+        ring_buf_get(&log_ring_buf, (uint8_t*)&dummy, sizeof(struct log_item));
     }
-
-    /* 将最新的日志数据压入缓冲区（数据永远最新，绝不引发系统崩溃） */
-    ring_buf_put(&log_ring_buf, (const uint8_t *)&item, sizeof(struct log_item));
-
+    ring_buf_put(&log_ring_buf, (const uint8_t*)&item, sizeof(struct log_item));
     k_spin_unlock(&log_lock, key);
-
-    /* 唤醒打印线程 */
     k_condvar_signal(&log_condvar);
 }
 
-/* 核心需求 2：专用串口打印线程函数 */
-void uart_print_thread_entry(void *p1, void *p2, void *p3)
+void uart_print_thread_entry(void* p1, void* p2, void* p3)
 {
     struct log_item item_to_print;
-
-    while (1) {
+    while (1)
+    {
         k_mutex_lock(&log_mutex, K_FOREVER);
-
-        /* 只要环形缓冲区里是空的，打印线程就挂起休眠，零消耗 CPU */
-        while (ring_buf_is_empty(&log_ring_buf)) {
+        while (ring_buf_is_empty(&log_ring_buf))
+        {
             k_condvar_wait(&log_condvar, &log_mutex, K_FOREVER);
         }
-
-        /* 获取互斥锁锁定的数据后，提取一条日志 */
         k_spinlock_key_t key = k_spin_lock(&log_lock);
-        uint32_t bytes_read = ring_buf_get(&log_ring_buf, (uint8_t *)&item_to_print, sizeof(struct log_item));
+        uint32_t bytes_read = ring_buf_get(&log_ring_buf, (uint8_t*)&item_to_print, sizeof(struct log_item));
         k_spin_unlock(&log_lock, key);
-
         k_mutex_unlock(&log_mutex);
 
-        /* 真正执行唯一的物理串口 printk 动作 */
-        if (bytes_read == sizeof(struct log_item)) {
+        if (bytes_read == sizeof(struct log_item))
+        {
             printk("%s", item_to_print.str);
         }
     }
 }
 
-/* 动态向 Zephyr 内核注册该专用低优先级打印线程 */
-K_THREAD_DEFINE(uart_print_tid, PRINT_THREAD_STACK_SIZE, uart_print_thread_entry,
-                NULL, NULL, NULL, PRINT_THREAD_PRIORITY, 0, 0);
+K_THREAD_DEFINE(uart_print_tid, PRINT_THREAD_STACK_SIZE, uart_print_thread_entry, NULL, NULL, NULL,
+                PRINT_THREAD_PRIORITY, 0, 0);
+
+/* ==================== 屏幕UI数据刷新显示函数 ==================== */
+void update_oled_ui(void)
+{
+    if (!device_is_ready(display_dev))
+    {
+        return;
+    }
+
+    char buf[32]; /* 修正：定义为标准本地栈缓冲区字符数组 */
+
+    cfb_framebuffer_clear(display_dev, false);
+
+    cfb_draw_text(display_dev, "IOT TRACKER v4.4", 0, 0);
+
+    snprintf(buf, sizeof(buf), "MODE STATE: [%d]", (int)current_fsm_state);
+    cfb_draw_text(display_dev, buf, 0, 18);
+
+    if (gpio_pin_get_dt(&btn) == 1)
+    {
+        cfb_draw_text(display_dev, "STATUS: ACTIVE", 0, 36);
+    }
+    else
+    {
+        cfb_draw_text(display_dev, "STATUS: IDLE_WAIT", 0, 36);
+    }
+
+    cfb_framebuffer_finalize(display_dev);
+}
 
 /* =============================================================================== */
 
 static int64_t last_interrupt_time = 0;
 #define DEBOUNCE_DELAY_MS  30
 
-void button_pressed_isr(const struct device *port, struct gpio_callback *cb,
+void button_pressed_isr(const struct device* port, struct gpio_callback* cb,
                         gpio_port_pins_t pins)
 {
     int64_t current_time = k_uptime_get();
-    if ((current_time - last_interrupt_time) < DEBOUNCE_DELAY_MS) {
+    if ((current_time - last_interrupt_time) < DEBOUNCE_DELAY_MS)
+    {
         return;
     }
 
     int btn_pressed = gpio_pin_get_dt(&btn);
-    if (btn_pressed >= 0) {
+    if (btn_pressed >= 0)
+    {
         gpio_pin_set_dt(&led, btn_pressed);
 
-        if (btn_pressed) {
-            /* 在中断中使用无阻塞的 safe_log */
+        if (btn_pressed)
+        {
             safe_log("[ISR] 按键按下 -> LED 点亮 (唤醒状态保持)\n");
-        } else {
+            current_fsm_state = (current_fsm_state == STATE_0_HEARTBEAT) ? STATE_1_TRACKING : STATE_0_HEARTBEAT;
+        }
+        else
+        {
             safe_log("[ISR] 按键释放 -> LED 熄灭 (准备休眠触发)\n");
             k_sem_give(&sleep_countdown_sem);
         }
@@ -135,11 +157,10 @@ void button_pressed_isr(const struct device *port, struct gpio_callback *cb,
 
 int main(void)
 {
-    /* 所有的原有 printk 全部无缝无损升级为异步 safe_log */
-    safe_log("--- ABrobot STM32F103RCT6 Deep Sleep & IoT Module Control ---\n");
-    safe_log("Zephyr OS Version: %s (PM Subsystem Initialized)\n", KERNEL_VERSION_STRING);
+    safe_log("--- ABrobot STM32F103RCT6 Async OLED Display Test ---\n");
 
-    if (!gpio_is_ready_dt(&led) || !gpio_is_ready_dt(&btn)) {
+    if (!gpio_is_ready_dt(&led) || !gpio_is_ready_dt(&btn))
+    {
         return -1;
     }
     gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
@@ -149,98 +170,92 @@ int main(void)
     gpio_init_callback(&button_cb_data, button_pressed_isr, BIT(btn.pin));
     gpio_add_callback(btn.port, &button_cb_data);
 
-    safe_log("\n[INIT] 正在冷启动系统...\n");
-    safe_log("[📢 唤醒提醒] 探测到系统苏醒！正在为 4G 模块 / GPS 模块拉高可控电源引脚(VCC/EN)！\n");
-    safe_log("[📢 唤醒提醒] 正在向 4G 模块发送 AT 握手指令，初始化全球定位 GPS 基础网关...\n\n");
+    if (!device_is_ready(display_dev))
+    {
+        safe_log("CRITICAL: SSD1306 OLED display device not ready via I2C1\n");
+    }
+    else
+    {
+        cfb_framebuffer_init(display_dev);
 
-    while (1) {
+        uint8_t num_fonts = cfb_get_numof_fonts(display_dev);
+        for (uint8_t i = 0; i < num_fonts; i++)
+        {
+            /* 核心修正：严格对齐 Zephyr 4.4.1 的 uint8_t 宽高数据类型定义 */
+            uint8_t width, height;
+            cfb_get_font_size(display_dev, i, &width, &height);
+            safe_log("Loaded Built-in Font index %d: Size %dx%d\n", (int)i, (int)width, (int)height);
+        }
+
+        cfb_set_kerning(display_dev, 0);
+        safe_log("OLED Driver initialization sequence passed.\n");
+
+        update_oled_ui();
+    }
+
+    while (1)
+    {
+        update_oled_ui();
+
         k_sem_take(&sleep_countdown_sem, K_FOREVER);
 
         safe_log("松开检测成功，系统将在 2 秒后进入微安级 Deep Sleep...\n");
+        update_oled_ui();
         k_msleep(2000);
 
-        if (gpio_pin_get_dt(&btn) == 0) {
-
+        if (gpio_pin_get_dt(&btn) == 0)
+        {
             safe_log("\n⚠️-----------------[ CRITICAL: PRE-SLEEP WARNING ]-----------------⚠️\n");
             safe_log("[🚨 断电提醒] 即将进入微安级深度睡眠(Stop Mode)！\n");
-            safe_log("[🚨 断电提醒] 请确保此时已通过 GPIO 关断了外挂 4G 模组的 MOS 管电源！\n");
-            safe_log("[🚨 断电提醒] 请确保已经将 GPS 模块的 EN/SLEEP 引脚拉低，否则会有漏电！\n");
-            safe_log("⚠️----------------------------------------------------------------⚠️\n");
-            safe_log("系统断电准备就绪，关闭主时钟，芯片进入静默状态...\n\n");
 
-            /*
-             * 核心需求 3：拦截休眠！
-             * 在把芯片推入 Stop Mode 之前，必须强行等上面的低优先级打印线程清空（Flush）所有积压数据！
-             * 只要环形缓冲区内还残存一条旧数据，主线程就主动出让 CPU 节点，直到旧数据完完整整吐给物理串口。
-             */
-            while (!ring_buf_is_empty(&log_ring_buf)) {
-                k_yield(); /* 出让执行权，让打印线程高速消耗并清空环形缓冲区 */
+            if (device_is_ready(display_dev))
+            {
+                display_blanking_on(display_dev);
             }
 
-            /* 额外预留一小点硬件 FIFO 物理吐完时间 */
+            while (!ring_buf_is_empty(&log_ring_buf))
+            {
+                k_yield();
+            }
             k_msleep(5);
 
-                       /* 强制低功耗跳转 */
-            struct pm_state_info state = {
-                .state = PM_STATE_SUSPEND_TO_RAM,
-                .substate_id = 0
-            };
-
-            pm_state_force(0, &state);
-
-            /* 芯片正式进入 Stop 深度睡眠，CPU 停止 */
+            /*
+             * ==================== Zephyr 4.4.1 现代策略控制休眠法 ====================
+             * 废弃旧的强制接口，改为通过策略锁（Policy Lock）控制内核：
+             * 我们锁定所有的浅度睡眠等级（比如 RUNTIME_IDLE），强制告诉内核在 WFI 时
+             * 必须滑入最深也最省电的 SUSPEND_TO_RAM (Stop 模式)。
+             */
+            /*
+ * ==================== Zephyr 4.4.1 现代策略控制休眠法 ====================
+ * 修正：使用 Zephyr 4.4.1 官方标准的 PM_ALL_SUBSTATES 宏
+ */
+            pm_policy_state_lock_get(PM_STATE_RUNTIME_IDLE, PM_ALL_SUBSTATES);
+            /* 执行内核级汇编指令，芯片正式断电沉睡... */
             k_cpu_idle();
 
+
             /* =======================================================================
-             * ⚡ 硬件苏醒线（显式、稳健、最高优先级的初始化段落）
-             * ======================================================================= */
+                * ⚡ 硬件苏醒线（显式、稳健、最高优先级的复苏段落）
+                * ======================================================================= */
 
-            /*
-             * 1. 【显式硬初始化拦截】
-             * 如果你未来将主频配置为了 72MHz (HSE + PLL)，此处必须显式重新激活锁相环！
-             * 哪怕是在当前的 8MHz HSI 模式下，此行也能确保强制刷新硬件 RCC 寄存器，
-             * 防止因硬件唤醒瞬间电平抖动导致系统总线分频器（AHB/APB）出现不可预知的权值错乱。
-             */
-#if defined(CONFIG_SOC_SERIES_STM32F1X)
-            /*
-             * 显式调用 STM32 HAL 层或底层驱动的时钟校准。
-             * 在 Zephyr 框架中，显式调用系统的时钟控制 subsystem 恢复，是最稳健的做法：
-             */
-            const struct device *const rcc_dev = DEVICE_DT_GET(DT_NODELABEL(rcc));
-            if (device_is_ready(rcc_dev)) {
-                /*
-                 * 显式通知时钟控制器：立刻重新硬同步全板的主时钟树！
-                 * 确保在接下来的 safe_log 打印前，USART 总线频率是绝对确定且正确的。
-                 */
-                // clock_control_on(rcc_dev, ...); /* 可根据未来 72M 的实际配置硬写入 RCC_CR 寄存器 */
+            /* 修正：解锁时同样对齐使用 PM_ALL_SUBSTATES */
+            pm_policy_state_lock_put(PM_STATE_RUNTIME_IDLE, PM_ALL_SUBSTATES);
 
-                /* 硬写 STM32 寄存器示例（最明确的控制）：确保 HSI 绝对稳定且为主时钟 */
-                SET_BIT(RCC->CR, RCC_CR_HSION);
-                while(READ_BIT(RCC->CR, RCC_CR_HSIRDY) == 0); /* 死等内部时钟硬件就绪 */
-            }
-#endif
+            SET_BIT(RCC->CR, RCC_CR_HSION);
+            while (READ_BIT(RCC->CR, RCC_CR_HSIRDY) == 0);
 
-            /*
-             * 2. 【显式时间轴对齐】
-             * 显式通告 Zephyr 的内核时间轴：CPU 已经结束静默。
-             * 虽然后台空闲线程有兜底，但在此处显式调用系统跟踪/时间同步桩，
-             * 能在当前的抢占式上下文里，瞬间锁定并更新内核的全局虚拟 Tick 计数器，
-             * 彻底杜绝后续调用 k_uptime_get() 时读到休眠前的“僵尸旧时间轴”。
-             */
 #if CONFIG_TRACING
             sys_trace_idle_exit();
 #endif
+            if (device_is_ready(display_dev))
+            {
+                display_blanking_off(display_dev);
+            }
 
-            /*
-             * 3. 经过上述显式的硬件、软件双重对齐后，
-             * 我们可以百分之百放心地执行接下来的核心业务：重开 4G 电源、发送 AT 指令。
-             */
             safe_log("\n⚡-----------------[ CRITICAL: WAKEUP DETECTED ]-----------------⚡\n");
-            safe_log("[📢 唤醒提醒] 检测到 PC6 按键外部中断！STM32 内部 HSI 时钟树已显式恢复运转！\n");
-            safe_log("[📢 唤醒提醒] 正在重新为 4G 核心模块/大功率 GPS 天线拉高电源使能端！\n");
-            safe_log("[📢 唤醒提醒] 正在重新初始化物理串口通信链路，准备重建 4G MQTT 网络连接...\n");
-            safe_log("⚡----------------------------------------------------------------⚡\n\n");
+            safe_log("[📢 唤醒提醒] 检测到 PC6 外部中断！系统时钟和显示外设已硬恢复就绪！\n");
 
+            update_oled_ui();
         }
     }
     return 0;
