@@ -63,6 +63,18 @@
 		com-invdir;
 		prechargep = <0x22>;
 	};
+	/* 追加：LIS3DSH 三轴高精度加速度计硬件节点 */
+	lis3dsh: lis3dsh@1d {
+		compatible = "st,lis3dsh";
+		reg = <0x1d>; /* LIS3DSH 的标准 I2C 硬件七位物理地址 */
+
+		/*
+		 * 核心硬件中断路由：将 LIS3DSH 的 INT1 引脚
+		 * 物理连接到核心板的 PA1 (GPIOA Pin 1)，设置为高电平触发
+		 */
+		irq-gpios = <&gpioa 1 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
 };
 
 &clk_hsi { status = "okay"; };

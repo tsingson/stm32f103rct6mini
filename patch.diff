@@ -1,0 +1,26 @@
+
+diff --git a/src/lis3dsh_app.c b/src/lis3dsh_app.c
+@@
+ #include "lis3dsh_app.h"
+ #include "ssd1306_app.h"
++#include <zephyr/device.h>
+ #include <zephyr/drivers/sensor.h>
++#include <errno.h>
+@@
+-static const struct device *lis3dsh_dev = DEVICE_DT_GET(DT_NODELABEL(lis3dsh));
++static const struct device *lis3dsh_dev;
+@@
+ int lis3dsh_motion_init(void)
+ {
++    lis3dsh_dev = device_get_binding(DEVICE_DT_NAME(DT_NODELABEL(lis3dsh)));
++    if (lis3dsh_dev == NULL) {
++        printk("CRITICAL ERROR: LIS3DSH driver instance not found in Zephyr 4.4.1!\n");
++        return -ENODEV;
++    }
++
+     if (!device_is_ready(lis3dsh_dev)) {
+         printk("CRITICAL ERROR: LIS3DSH I2C Device hardware not ready!\n");
+-        return -1;
++        return -ENODEV;
+     }
+
