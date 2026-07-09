@@ -1,234 +1,121 @@
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/gpio.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/spi.h>
 #include <zephyr/sys/printk.h>
-#include <zephyr/sys/ring_buffer.h>
-#include <zephyr/version.h>
-#include <zephyr/pm/pm.h>
-#include <zephyr/pm/policy.h>
-#include <stdio.h>
-#include <string.h>
-#include "lis3dsh_app.h"
-#include "ssd1306_app.h" /* 引入新拆分的显示子模块头文件 */
 
-#if !DT_NODE_EXISTS(DT_ALIAS(led_user)) || !DT_NODE_EXISTS(DT_ALIAS(button_user))
-#error "Error: Critical device tree aliases missing!"
-#endif
+/*
+ * 从设备树中获取 lis3dsh 节点。
+ * 对应你 overlay 中的 lis3dsh: lis3dsh@0
+ */
+#define LIS3DSH_NODE DT_NODELABEL(lis3dsh)
 
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led_user), gpios);
-static const struct gpio_dt_spec btn = GPIO_DT_SPEC_GET(DT_ALIAS(button_user), gpios);
-static struct gpio_callback button_cb_data;
+/*
+ * 定义 SPI 设备规格 (包含 CS 引脚控制)。
+ * LIS3DSH 支持 CPOL=1, CPHA=1 (Mode 3) 或 CPOL=0, CPHA=0 (Mode 0)。
+ */
+static const struct spi_dt_spec spi_dev = SPI_DT_SPEC_GET(LIS3DSH_NODE,
+                                          SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_MODE_CPOL | SPI_MODE_CPHA,
+                                          0);
 
-K_SEM_DEFINE(sleep_countdown_sem, 0, 1);
+/* LIS3DSH 寄存器地址 */
+#define LIS3DSH_REG_WHO_AM_I   0x0F
+#define LIS3DSH_REG_CTRL4      0x20
+#define LIS3DSH_REG_OUT_X_L    0x28
 
-enum tracker_state
+/* ST 传感器的 SPI 读写位和地址自增位 */
+#define SPI_READ_BIT           0x80
+#define SPI_AUTO_INC_BIT       0x40
+
+/**
+ * @brief 向 LIS3DSH 写入单个寄存器
+ */
+static int lis3dsh_reg_write(uint8_t reg, uint8_t data)
 {
-    STATE_0_HEARTBEAT = 0,
-    STATE_1_TRACKING = 1
-};
+    uint8_t tx_buf[2] = { reg, data }; // 最高位为 0 表示写入
+    const struct spi_buf tx = { .buf = tx_buf, .len = 2 };
+    const struct spi_buf_set tx_set = { .buffers = &tx, .count = 1 };
 
-static enum tracker_state current_fsm_state = STATE_0_HEARTBEAT;
-
-/* ==================== 异步日志 Ring Buffer 模块 ==================== */
-#define LOG_QUEUE_SIZE 32
-#define MAX_LOG_STR_LEN 128
-#define PRINT_THREAD_STACK_SIZE 1024
-#define PRINT_THREAD_PRIORITY 10
-
-struct log_item
-{
-    char str[MAX_LOG_STR_LEN];
-};
-
-RING_BUF_DECLARE(log_ring_buf, sizeof(struct log_item) * LOG_QUEUE_SIZE);
-static struct k_spinlock log_lock;
-K_CONDVAR_DEFINE(log_condvar);
-K_MUTEX_DEFINE(log_mutex);
-
-void safe_log(const char* format, ...)
-{
-    struct log_item item;
-    va_list args;
-    va_start(args, format);
-    vsnprintf(item.str, sizeof(item.str), format, args);
-    va_end(args);
-
-    k_spinlock_key_t key = k_spin_lock(&log_lock);
-    uint32_t free_space = ring_buf_space_get(&log_ring_buf);
-    if (free_space < sizeof(struct log_item))
-    {
-        struct log_item dummy;
-        ring_buf_get(&log_ring_buf, (uint8_t*)&dummy, sizeof(struct log_item));
-    }
-    ring_buf_put(&log_ring_buf, (const uint8_t*)&item, sizeof(struct log_item));
-    k_spin_unlock(&log_lock, key);
-    k_condvar_signal(&log_condvar);
+    return spi_write_dt(&spi_dev, &tx_set);
 }
 
-void uart_print_thread_entry(void* p1, void* p2, void* p3)
+/**
+ * @brief 从 LIS3DSH 读取多个寄存器
+ */
+static int lis3dsh_reg_read(uint8_t reg, uint8_t *data, size_t len)
 {
-    struct log_item item_to_print;
-    while (1)
-    {
-        k_mutex_lock(&log_mutex, K_FOREVER);
-        while (ring_buf_is_empty(&log_ring_buf))
-        {
-            k_condvar_wait(&log_condvar, &log_mutex, K_FOREVER);
-        }
-        k_spinlock_key_t key = k_spin_lock(&log_lock);
-        uint32_t bytes_read = ring_buf_get(&log_ring_buf, (uint8_t*)&item_to_print, sizeof(struct log_item));
-        k_spin_unlock(&log_lock, key);
-        k_mutex_unlock(&log_mutex);
-
-        if (bytes_read == sizeof(struct log_item))
-        {
-            printk("%s", item_to_print.str);
-        }
-    }
-}
-
-K_THREAD_DEFINE(uart_print_tid, PRINT_THREAD_STACK_SIZE, uart_print_thread_entry, NULL, NULL, NULL,
-                PRINT_THREAD_PRIORITY, 0, 0);
-
-/* ==================== 统一的非阻塞 UI 更新投递代理 ==================== */
-void push_display_ui_update(void)
-{
-    struct display_msg_packet msg;
-    memset(&msg, 0, sizeof(msg));
-
-    /* 填充多行文本 */
-    strncpy(msg.lines[0], "IOT v4.4", DISPLAY_LINE_MAX_LEN);
-    snprintf(msg.lines[1], DISPLAY_LINE_MAX_LEN, "MODE: [%d]", (int)current_fsm_state);
-
-    if (gpio_pin_get_dt(&btn) == 1)
-    {
-        strncpy(msg.lines[2], "S: ACTIVE", DISPLAY_LINE_MAX_LEN);
-    }
-    else
-    {
-        strncpy(msg.lines[2], "S: IDLE_WAIT", DISPLAY_LINE_MAX_LEN);
-    }
-
     /*
-     * 核心解耦：将打包好的数据无脑丢进消息队列。
-     * K_NO_WAIT 代表如果队列由于极端原因满了，直接覆盖或报错退出，绝不在中断/业务中发生阻塞！
+     * 若读取多个字节，需要开启地址自增位 (SPI_AUTO_INC_BIT)
+     * 并设置读取位 (SPI_READ_BIT)
      */
-    k_msgq_put(&display_msg_q, &msg, K_NO_WAIT);
-}
-
-/* =============================================================================== */
-
-static int64_t last_interrupt_time = 0;
-#define DEBOUNCE_DELAY_MS  3
-
-void button_pressed_isr(const struct device* port, struct gpio_callback* cb,
-                        gpio_port_pins_t pins)
-{
-    int64_t current_time = k_uptime_get();
-    if ((current_time - last_interrupt_time) < DEBOUNCE_DELAY_MS)
-    {
-        return;
+    uint8_t tx_cmd = reg | SPI_READ_BIT;
+    if (len > 1) {
+        tx_cmd |= SPI_AUTO_INC_BIT;
     }
 
-    int btn_pressed = gpio_pin_get_dt(&btn);
-    if (btn_pressed >= 0)
-    {
-        gpio_pin_set_dt(&led, btn_pressed);
+    uint8_t tx_buf[1] = { tx_cmd };
+    const struct spi_buf tx = { .buf = tx_buf, .len = 1 };
+    const struct spi_buf_set tx_set = { .buffers = &tx, .count = 1 };
 
-        if (btn_pressed)
-        {
-            safe_log("[ISR] 按键按下 -> LED 点亮 (唤醒状态保持)\n");
-            current_fsm_state = (current_fsm_state == STATE_0_HEARTBEAT) ? STATE_1_TRACKING : STATE_0_HEARTBEAT;
+    /* 接收缓冲区需要比实际数据多 1 个字节（为了应对发送命令时的虚拟接收） */
+    const struct spi_buf rx = { .buf = data, .len = len + 1 };
+    const struct spi_buf_set rx_set = { .buffers = &rx, .count = 1 };
 
-            /* 在中断上下文直接调用，非阻塞向队列派发 UI 数据 */
-            push_display_ui_update();
-        }
-        else
-        {
-            safe_log("[ISR] 按键释放 -> LED 熄灭 (准备休眠触发)\n");
-            k_sem_give(&sleep_countdown_sem);
-        }
-        last_interrupt_time = current_time;
-    }
+    return spi_transceive_dt(&spi_dev, &tx_set, &rx_set);
 }
 
 int main(void)
 {
-    safe_log("--- ABrobot STM32F103RCT6 Split Thread UI System ---\n");
+    int ret;
+    uint8_t rx_buf[7] = {0}; // 1 字节 dummy + 6 字节数据 (X, Y, Z 各两个字节)
 
-    if (!gpio_is_ready_dt(&led) || !gpio_is_ready_dt(&btn))
-    {
-        return -1;
-    }
-    gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
-    gpio_pin_configure_dt(&btn, GPIO_INPUT);
+    printk("Starting LIS3DSH SPI Test...\n");
 
-    gpio_pin_interrupt_configure_dt(&btn, GPIO_INT_EDGE_BOTH);
-    gpio_init_callback(&button_cb_data, button_pressed_isr, BIT(btn.pin));
-    gpio_add_callback(btn.port, &button_cb_data);
- //
-    int ret = lis3dsh_motion_init();
-    if (ret) {
-        safe_log("LIS3DSH init failed: %d\n", ret);
+    /* 1. 检查 SPI 设备是否就绪 */
+    if (!spi_is_ready_dt(&spi_dev)) {
+        printk("Error: SPI device is not ready!\n");
+        return 0;
     }
 
-    /* 开机主动刷新一次初始数据包到显示队列 */
-    push_display_ui_update();
+    /* 2. 读取 WHO_AM_I 寄存器确认芯片 (LIS3DSH 的预期值是 0x3F) */
+    ret = lis3dsh_reg_read(LIS3DSH_REG_WHO_AM_I, rx_buf, 1);
+    if (ret < 0) {
+        printk("Failed to read WHO_AM_I (err %d)\n", ret);
+        return 0;
+    }
+    printk("LIS3DSH WHO_AM_I: 0x%02X (Expected: 0x3F)\n", rx_buf[1]);
 
-    while (1)
-    {
-        /* 主常态循环，如果有状态变更随时投递 */
-        push_display_ui_update();
+    /* 3. 初始化传感器 (CTRL_REG4: 100Hz 输出，开启 X, Y, Z) */
+    // 0x67 = 0110 (100Hz) 0111 (Z, Y, X enable)
+    ret = lis3dsh_reg_write(LIS3DSH_REG_CTRL4, 0x67);
+    if (ret < 0) {
+        printk("Failed to initialize LIS3DSH\n");
+        return 0;
+    }
+    printk("LIS3DSH Initialized.\n");
+    k_msleep(100); // 等待传感器稳定
 
-        k_sem_take(&sleep_countdown_sem, K_FOREVER);
-
-        safe_log("松开检测成功，系统将在 2 秒后进入微安级 Deep Sleep...\n");
-        push_display_ui_update();
-        k_msleep(2000);
-
-        if (gpio_pin_get_dt(&btn) == 0)
-        {
-            safe_log("\n⚠️-----------------[ CRITICAL: PRE-SLEEP WARNING ]-----------------⚠️\n");
-            safe_log("[🚨 断电提醒] 即将进入微安级深度睡眠(Stop Mode)！\n");
-
+    /* 4. 循环读取三轴数据 */
+    while (1) {
+        ret = lis3dsh_reg_read(LIS3DSH_REG_OUT_X_L, rx_buf, 6);
+        if (ret == 0) {
             /*
-             * 需求 3 的多维度拦截：
-             * 1. 拦截一：必须等显示内核消息队列里的挂起包被完全消耗掉 (`num_used == 0`)
-             * 2. 拦截二：必须等物理串口日志环形缓冲区被完全清空 (`is_empty == true`)
+             * 数据组合：低位在前，高位在后。
+             * rx_buf[0] 是发送指令时的 dummy 数据，真实数据从 rx_buf[1] 开始。
              */
-            while ((k_msgq_num_used_get(&display_msg_q) > 0) || !ring_buf_is_empty(&log_ring_buf))
-            {
-                k_yield(); /* 疯狂挂起当前主任务，把时间切片借给显示线程和串口线程，直到它们全干完活 */
-            }
+            int16_t x_raw = (int16_t)((rx_buf[2] << 8) | rx_buf[1]);
+            int16_t y_raw = (int16_t)((rx_buf[4] << 8) | rx_buf[3]);
+            int16_t z_raw = (int16_t)((rx_buf[6] << 8) | rx_buf[5]);
 
-            /* 最后一包数据渲染完毕，物理关断屏幕硬件电荷泵，彻底防漏电 */
-            ssd1306_set_blanking(true);
+            /* 转换为以 g 为单位的物理值 (假设默认 ±2g 量程，灵敏度约为 0.061 mg/LSB) */
+            float x_g = (float)x_raw * 0.061f / 1000.0f;
+            float y_g = (float)y_raw * 0.061f / 1000.0f;
+            float z_g = (float)z_raw * 0.061f / 1000.0f;
 
-            k_msleep(5);
-
-            /* 现代策略控制休眠 */
-            pm_policy_state_lock_get(PM_STATE_RUNTIME_IDLE, PM_ALL_SUBSTATES);
-            k_cpu_idle();
-
-            /* =======================================================================
-             * ⚡ 硬件苏醒线（显式、稳健、最高优先级的复苏段落）
-             * ======================================================================= */
-            pm_policy_state_lock_put(PM_STATE_RUNTIME_IDLE, PM_ALL_SUBSTATES);
-
-            SET_BIT(RCC->CR, RCC_CR_HSION);
-            while (READ_BIT(RCC->CR, RCC_CR_HSIRDY) == 0);
-
-#if CONFIG_TRACING
-            sys_trace_idle_exit();
-#endif
-            /* 硬件睁眼的第一微秒：物理拉通屏幕供电扫描线 */
-            ssd1306_set_blanking(false);
-
-            safe_log("\n⚡-----------------[ CRITICAL: WAKEUP DETECTED ]-----------------⚡\n");
-            safe_log("[📢 唤醒提醒] 检测到 PC6 外部中断！多线程消息内核和显示外设同步复苏！\n");
-
-            /* 唤醒后，无脑投递刷新一包全新复苏状态的 UI 报文 */
-            push_display_ui_update();
+            printk("X: %7.3f g | Y: %7.3f g | Z: %7.3f g\n", x_g, y_g, z_g);
+        } else {
+            printk("SPI Read Error: %d\n", ret);
         }
+
+        k_msleep(500); // 每 500ms 打印一次
     }
-    return 0;
 }

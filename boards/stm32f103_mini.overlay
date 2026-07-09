@@ -75,15 +75,23 @@
 	apb2-prescaler = <1>;
 };
 
-
+/* ================== SPI1 修正部分 ================== */
 &spi1 {
 	status = "okay";
+
+	/*
+	 * 直接引用 Zephyr 官方为 STM32F1 预备的 SPI1 主机（Master）标准引脚标签
+	 * 这样就不需要自己去写复杂的 &pinctrl 宏组合了
+	 */
+	pinctrl-0 = <&spi1_sck_master_pa5 &spi1_miso_master_pa6 &spi1_mosi_master_pa7>;
+	pinctrl-names = "default";
+
+	/* PA4 作为片选 */
 	cs-gpios = <&gpioa 4 GPIO_ACTIVE_LOW>;
 
 	lis3dsh: lis3dsh@0 {
-		compatible = "st,lis3dsh";
+		compatible = "vnd,spi-device";
 		reg = <0>;
 		spi-max-frequency = <1000000>;
-		status = "okay";
 	};
 };
