@@ -33,7 +33,8 @@ int main(void)
     int16_t x_raw = 0;
     int16_t y_raw = 0;
     int16_t z_raw = 0;
-    uint32_t total_steps = 0;
+    uint32_t total_steps = 0U;
+    uint32_t steps_inc = 0U;
     //
 
     int ret;
@@ -111,33 +112,31 @@ int main(void)
     /* 5. 刷新高通滤波器，清空可能存在的前置历史干扰 */
     lis3dh_reset_baseline(&spi_dev);
 
-    /* 6. 核心轮询采样与计步状态机处理 */
+
     while (1)
     {
-        /* 使用给定的头文件 API 直接读取三轴 16 位原始 ADC 寄存器值 */
-        ret = lis3dh_read_xyz(&spi_dev, &x_raw, &y_raw, &z_raw);
-        if (ret == 0)
+        /* 完全信任并在内部传递指针，不进行外部重复拼接 */
+        if (lis3dh_read_xyz(&spi_dev, &x_raw, &y_raw, &z_raw) == 0)
         {
-            /* 获取符合 C17 约束的 Zephyr 系统毫秒时间戳 */
             int64_t now_ms = k_uptime_get();
 
-            /* 调用纯整数极致加速算法：内部执行快速开方与数据平滑处理 */
-            /* 之前：if (walk_pedometer_process(&my_pedometer, &x_raw, &y_raw, &z_raw, now_ms)) */
-            /* 现在：直接传值，更快更安全 */
-            if (walk_pedometer_process(&my_pedometer, x_raw, y_raw, z_raw, now_ms))
+            /* 参数值传递：安全传递 x_raw, y_raw, z_raw 副本 */
+            (void)walk_pedometer_process(&my_pedometer, x_raw, y_raw, z_raw, now_ms, &steps_inc);
+
+            if (steps_inc > 0U)
             {
-                total_steps++;
-                printf("[SPI WALK] 步数 +1！当前总数: %u\n", total_steps);
+                total_steps += steps_inc;
+                if (steps_inc == WALK_REQUIRED_STEPS)
+                {
+                    printf("[WALK TRIGGER] 连续走满4步激活！追加4步。当前总数: %u\n", total_steps);
+                }
+                else
+                {
+                    printf("[WALK] 实时计步。当前总数: %u\n", total_steps);
+                }
             }
         }
-        else
-        {
-            printf("警告: 从 LIS3DH 读取三轴加速度数据失败 (错误码: %d)\n", ret);
-        }
-
-        /* 维持 25Hz 的高定时精度 */
         k_msleep(SAMPLING_RATE_MS);
     }
-
     return 0;
 }

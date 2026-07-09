@@ -1,19 +1,26 @@
 #include "walk.h"
 #include <stddef.h>
 
-static inline uint32_t walk_isqrt(uint32_t val) {
+static inline uint32_t walk_isqrt(uint32_t val)
+{
     uint32_t res = 0;
     uint32_t bit = 1U << 30;
     while (bit > val) { bit >>= 2; }
-    while (bit != 0) {
-        if (val >= res + bit) { val -= res + bit; res = (res >> 1) + bit; }
+    while (bit != 0)
+    {
+        if (val >= res + bit)
+        {
+            val -= res + bit;
+            res = (res >> 1) + bit;
+        }
         else { res >>= 1; }
         bit >>= 2;
     }
     return res;
 }
 
-static inline int32_t walk_moving_average(walk_pedometer_t *ctx, int32_t new_val) {
+static inline int32_t walk_moving_average(walk_pedometer_t* ctx, int32_t new_val)
+{
     ctx->filter_sum -= ctx->filter_buffer[ctx->filter_index];
     ctx->filter_buffer[ctx->filter_index] = new_val;
     ctx->filter_sum += new_val;
@@ -21,7 +28,8 @@ static inline int32_t walk_moving_average(walk_pedometer_t *ctx, int32_t new_val
     return ctx->filter_sum / FILTER_WINDOW_SIZE;
 }
 
-void walk_pedometer_init(walk_pedometer_t *ctx, uint8_t range_g, uint32_t threshold_lsb, uint32_t delay_ms) {
+void walk_pedometer_init(walk_pedometer_t* ctx, uint8_t range_g, uint32_t threshold_lsb, uint32_t delay_ms)
+{
     if (ctx == NULL) return;
 
     for (int i = 0; i < FILTER_WINDOW_SIZE; i++) ctx->filter_buffer[i] = 0;
@@ -38,7 +46,9 @@ void walk_pedometer_init(walk_pedometer_t *ctx, uint8_t range_g, uint32_t thresh
     ctx->gravity_base = (range_g == 4) ? 2048U : 4096U;
 }
 
-bool walk_pedometer_process(walk_pedometer_t *ctx, int16_t x, int16_t y, int16_t z, int64_t current_time_ms, uint32_t *steps_to_add) {
+bool walk_pedometer_process(walk_pedometer_t* ctx, int16_t x, int16_t y, int16_t z, int64_t current_time_ms,
+                            uint32_t* steps_to_add)
+{
     if (ctx == NULL || steps_to_add == NULL) return false;
 
     *steps_to_add = 0U;
@@ -55,9 +65,11 @@ bool walk_pedometer_process(walk_pedometer_t *ctx, int16_t x, int16_t y, int16_t
     uint32_t u_vmx_filtered = (vmx_filtered < 0) ? 0U : (uint32_t)vmx_filtered;
 
     /* 断步超时检测 */
-    if (ctx->last_step_time_ms != -1LL) {
+    if (ctx->last_step_time_ms != -1LL)
+    {
         int64_t idle_diff = current_time_ms - ctx->last_step_time_ms;
-        if (idle_diff > (int64_t)WALK_TIMEOUT_MS) {
+        if (idle_diff > (int64_t)WALK_TIMEOUT_MS)
+        {
             ctx->continuous_steps = 0U;
             ctx->is_active = false;
         }
@@ -65,21 +77,28 @@ bool walk_pedometer_process(walk_pedometer_t *ctx, int16_t x, int16_t y, int16_t
 
     /* 阈值边界全程采用纯无符号域运算 */
     uint32_t high_bound = ctx->gravity_base + ctx->step_threshold;
-    uint32_t low_bound  = ctx->gravity_base + (ctx->step_threshold / 2U);
+    uint32_t low_bound = ctx->gravity_base + (ctx->step_threshold / 2U);
 
-    if (u_vmx_filtered > high_bound) {
-        if (!ctx->is_above_threshold) {
+    if (u_vmx_filtered > high_bound)
+    {
+        if (!ctx->is_above_threshold)
+        {
             int64_t time_diff = current_time_ms - ctx->last_step_time_ms;
             uint64_t elapsed_ms = (time_diff < 0) ? 0ULL : (uint64_t)time_diff;
 
-            if (ctx->last_step_time_ms == -1LL || elapsed_ms > (uint64_t)ctx->step_delay_ms) {
+            if (ctx->last_step_time_ms == -1LL || elapsed_ms > (uint64_t)ctx->step_delay_ms)
+            {
                 ctx->last_step_time_ms = current_time_ms;
 
-                if (ctx->is_active) {
+                if (ctx->is_active)
+                {
                     *steps_to_add = 1U;
-                } else {
+                }
+                else
+                {
                     ctx->continuous_steps++;
-                    if (ctx->continuous_steps >= WALK_REQUIRED_STEPS) {
+                    if (ctx->continuous_steps >= WALK_REQUIRED_STEPS)
+                    {
                         ctx->is_active = true;
                         *steps_to_add = WALK_REQUIRED_STEPS;
                     }
@@ -87,7 +106,9 @@ bool walk_pedometer_process(walk_pedometer_t *ctx, int16_t x, int16_t y, int16_t
             }
             ctx->is_above_threshold = true;
         }
-    } else if (u_vmx_filtered < low_bound) {
+    }
+    else if (u_vmx_filtered < low_bound)
+    {
         ctx->is_above_threshold = false;
     }
 
