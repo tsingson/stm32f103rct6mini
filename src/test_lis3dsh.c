@@ -22,7 +22,9 @@ static struct gpio_callback int1_cb_data;
 
 void int1_gpio_isr(const struct device* dev, struct gpio_callback* cb, uint32_t pins)
 {
-    (void)dev; (void)cb; (void)pins;
+    (void)dev;
+    (void)cb;
+    (void)pins;
     k_sem_give(&motion_sem);
 }
 
@@ -36,12 +38,17 @@ int main(void)
     int ret;
     uint8_t int_src = 0;
     uint8_t who_am_i = 0;
-    walk_pedometer_t my_pedometer;
+    walk_combined_pedometer_t my_pedometer;
 
-    uint32_t elderly_threshold = 180U;
-    uint32_t elderly_debounce  = 400U;
-    uint32_t elderly_timeout   = 4000U;
+    // uint32_t elderly_threshold = 180U;
+    // uint32_t elderly_debounce  = 400U;
+    // uint32_t elderly_timeout   = 4000U;
     uint32_t log_counter = 0U;
+    uint32_t elderly_debounce = 400U; /* 400ms 基础迈步防抖 */
+    uint32_t elderly_timeout = 4500U; /* 4.5秒超宽走走停停超时 */
+    uint32_t min_amplitude = 140U; /* 140 LSB 运动起伏阻尼 */
+    uint32_t tilt_threshold = 12000U; /* 允许的最大倾角偏转 12.0° */
+    uint32_t car_suppression = 1500000U; /* 车辆高频噪声微方差熔断门槛 */
 
     k_msleep(500);
     printk("\n--- LIS3DH Hardened Low-Power Pedometer System ---\n");
@@ -78,8 +85,13 @@ int main(void)
     gpio_add_callback(int1_gpio.port, &int1_cb_data);
 
     /* 初始化自适应核心上下文 */
-    walk_pedometer_init(&my_pedometer, 2, elderly_debounce, elderly_timeout, elderly_threshold);
+    /* 修改前：walk_pedometer_init(&my_pedometer, 2, elderly_threshold, elderly_debounce); */
+    /* 修改后：*/
 
+
+    walk_combined_init(&my_pedometer, 2, elderly_debounce, elderly_timeout, min_amplitude, tilt_threshold,
+                       car_suppression);
+    walk_combined_set_tilt_baseline(&my_pedometer, 0, 0, 4096);
     while (1)
     {
         /* ================================================================= */
@@ -89,7 +101,8 @@ int main(void)
         k_msleep(5);
 
         /* 写入低功耗 WOM 配置寄存器流 */
-        if (lis3dh_enter_low_power_wom(&spi_dev, 15U) < 0) {
+        if (lis3dh_enter_low_power_wom(&spi_dev, 15U) < 0)
+        {
             k_msleep(500);
             continue;
         }
@@ -115,7 +128,8 @@ int main(void)
         /* 💡 核心修正 3：醒来后第一时间关闭 STM32 的 GPIO 中断监听，防止后续快速走路摆手时频繁进出 ISR 拖慢计步 */
         gpio_pin_interrupt_configure_dt(&int1_gpio, GPIO_INT_DISABLE);
 
-        if (lis3dh_exit_to_normal_walking(&spi_dev) < 0) {
+        if (lis3dh_exit_to_normal_walking(&spi_dev) < 0)
+        {
             continue;
         }
 
@@ -133,7 +147,8 @@ int main(void)
             int64_t time_elapsed = now_ms - last_active_time;
             uint64_t idle_duration_ms = (time_elapsed < 0) ? 0ULL : (uint64_t)time_elapsed;
 
-            if (idle_duration_ms > 6000ULL) {
+            if (idle_duration_ms > 6000ULL)
+            {
                 /* 连续 6 秒未发生有效步伐位移或前置运动，打破循环，重新退回 Status A 深睡 */
                 break;
             }
@@ -141,15 +156,20 @@ int main(void)
             if (lis3dh_read_xyz(&spi_dev, &x_raw, &y_raw, &z_raw) == 0)
             {
                 /* 💡 修正隐患 4：使用标准承接标量，严防 (void) 强转副作用警告 */
-                bool is_walking = walk_pedometer_process(&my_pedometer, x_raw, y_raw, z_raw, now_ms, &steps_inc);
+                //    bool is_walking = walk_pedometer_process(&my_pedometer, x_raw, y_raw, z_raw, now_ms, &steps_inc);
+                /* 修改前：bool is_walking = walk_pedometer_process(&my_pedometer, x_raw, y_raw, z_raw, now_ms, &steps_inc); */
+                /* 修改后：*/
+                bool is_walking = walk_combined_process(&my_pedometer, x_raw, y_raw, z_raw, now_ms, &steps_inc);
 
-                if (steps_inc > 0U) {
+                if (steps_inc > 0U)
+                {
                     total_steps += steps_inc;
                     last_active_time = now_ms; /* 步数真实变动，刷新活跃时间戳 */
                     printf("🚶 [WALK_ENGINE] 精准捕捉成功。当前总步数: %u\n", total_steps);
                 }
 
-                if (is_walking) {
+                if (is_walking)
+                {
                     last_active_time = now_ms; /* 处于迈步防误判缓冲期，判定人仍处于活动状态，刷新时间戳 */
                 }
             }
