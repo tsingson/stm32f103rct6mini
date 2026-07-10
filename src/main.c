@@ -8,7 +8,7 @@
 #define SAMPLING_RATE_MS    (40)
 #define LIS3DH_NODE         DT_NODELABEL(lis3dsh)
 
-static const struct spi_dt_spec spi_dev = SPI_DT_SPEC_GET(LIS3DH_NODE, SPI_WORD_SET(8) | SPI_TRANSFER_MSB, 0);
+static const struct spi_dt_spec spi_dev = SPI_DT_SPEC_GET(LIS3DH_NODE, SPI_WORD_SET(8) | SPI_TRANSFER_MSB);
 static const struct gpio_dt_spec int1_gpio = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), sensor_irq_gpios);
 
 int main(void)
