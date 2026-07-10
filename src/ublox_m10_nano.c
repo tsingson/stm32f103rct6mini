@@ -1,42 +1,37 @@
 /**
  * @file ublox_m10_nano.c
- * @brief Zephyr 4.4.1 通用 u-blox M10 Nano GPS 驱动实现 (生产交付级，严格符合 C17)
+ * @brief Zephyr 4.4.1 通用 u-blox M10 Nano GPS 驱动实现 (100% 对齐原版解包逻辑)
  */
 
 #include "ublox_m10_nano.h"
-#include "gps_ring_buffer.h"
 #include <zephyr/logging/log.h>
-#include <zephyr/sys/ring_buffer.h>
 #include <string.h>
-#include <stdlib.h>
 
 LOG_MODULE_REGISTER(ublox_m10, CONFIG_GPS_LOG_LEVEL);
 
-#define GPS_UART_NODE DT_ALIAS(gps_uart)
-
-#if !DT_NODE_HAS_STATUS_OKAY(GPS_UART_NODE)
-#error "设备树别名 'gps_uart' 未启用或未定义。请检查您的 stm32f103_mini.overlay 文件！"
-#endif
-
-static const struct device* const uart_dev = DEVICE_DT_GET(GPS_UART_NODE);
-
-#define RX_RING_BUF_SIZE 1024U
-#define GPS_THREAD_STACK_SIZE 2048U
-#define GPS_THREAD_PRIORITY 5
-
-static uint8_t rx_ring_buffer[RX_RING_BUF_SIZE];
-static struct ring_buf ringbuf;
-static struct k_sem rx_sem;
+// 定义 100% 对齐原版的状态机内部枚举
+enum
+{
+    STATE_IDLE,
+    STATE_SYNC2,
+    STATE_CLASS,
+    STATE_ID,
+    STATE_LEN1,
+    STATE_LEN2,
+    STATE_PAYLOAD,
+    STATE_CKA,
+    STATE_CKB
+};
 
 // ==============================================================================
-// UART 中断回调函数 (将物理字节安全暂存至硬件环形缓冲区)
+// 1. UART 中断服务函数 (无缝对接特定实例的 Context，支持多实例并发现收)
 // ==============================================================================
 static void uart_callback(const struct device* dev, void* user_data)
 {
     uint8_t c;
-    ARG_UNUSED(user_data);
+    ublox_m10_context_t* ctx = (ublox_m10_context_t*)user_data;
 
-    if (!uart_irq_update(dev))
+    if ((ctx == NULL) || !uart_irq_update(dev))
     {
         return;
     }
@@ -45,9 +40,10 @@ static void uart_callback(const struct device* dev, void* user_data)
     {
         while (uart_fifo_read(dev, &c, 1U) == 1)
         {
-            if (ring_buf_put(&ringbuf, &c, 1U) == 1U)
+            // 压入该物理实例所属的专属接收缓冲区
+            if (ring_buf_put(&ctx->rx_raw_rb, &c, 1U) == 1U)
             {
-                k_sem_give(&rx_sem);
+                k_sem_give(&ctx->rx_signal_sem); // 精准唤醒该硬件对应的专用解包任务
             }
         }
     }
@@ -60,6 +56,7 @@ void ubx_nona_append_checksum(uint8_t* buffer, size_t len)
         return;
     }
     uint8_t ck_a = 0U, ck_b = 0U;
+    // Fletcher 算法：从 Class 字节开始，累加到 Checksum 之前
     for (size_t i = 2U; i < (len - 2U); i++)
     {
         ck_a += buffer[i];
@@ -69,132 +66,135 @@ void ubx_nona_append_checksum(uint8_t* buffer, size_t len)
     buffer[len - 1U] = ck_b;
 }
 
-void gps_configure_ubx_nona_proc(void)
+void gps_configure_ubx_nona_proc(ublox_m10_context_t* ctx)
 {
+    if ((ctx == NULL) || (ctx->uart_device == NULL))
+    {
+        return;
+    }
+
     uint8_t cfg_packet[] = {
         UBX_SYNC_CHAR_1, UBX_SYNC_CHAR_2, UBX_CLASS_CFG, UBX_ID_VALSET, 0x14U, 0x00U,
 
-        // --- Payload ---
-        0x00U, UBX_LAYER_ALL, 0x00U, 0x00U,
+        // --- Payload 开始 ---
+        0x00U, // Version: 0
+        UBX_LAYER_ALL, // ⭐ 全层持久化写入（RAM + BBR + Flash），断电不失忆
+        0x00U, 0x00U, // 保留位占位
 
-        // [1] 纯 UBX 模式
+        // [项 1] 禁 NMEA 文本，强制转为纯 UBX 二进制流模式
         (uint8_t)(KEY_UART1OUTPROT_UBX & 0xFFU),
         (uint8_t)((KEY_UART1OUTPROT_UBX >> 8U) & 0xFFU),
         (uint8_t)((KEY_UART1OUTPROT_UBX >> 16U) & 0xFFU),
         (uint8_t)((KEY_UART1OUTPROT_UBX >> 24U) & 0xFFU),
-        0x01U,
+        0x01U, // Value: 1 (纯 UBX 模式)
 
-        // [2] 5Hz 频率
+        // [项 2] 飙 5Hz 高频定位 (测量周期 200ms)
         (uint8_t)(KEY_RATE_MEAS & 0xFFU),
         (uint8_t)((KEY_RATE_MEAS >> 8U) & 0xFFU),
         (uint8_t)((KEY_RATE_MEAS >> 16U) & 0xFFU),
         (uint8_t)((KEY_RATE_MEAS >> 24U) & 0xFFU),
-        0xC8U, 0x00U,
+        0xC8U, 0x00U, // Value: 200 (U16 小端序)
 
-        // [3] NAV-PVT 主动上报
+        // [项 3] 开启 M10 全局 NAV-PVT 消息主动高频推送
         (uint8_t)(KEY_MSGOUT_NAV_PVT & 0xFFU),
         (uint8_t)((KEY_MSGOUT_NAV_PVT >> 8U) & 0xFFU),
         (uint8_t)((KEY_MSGOUT_NAV_PVT >> 16U) & 0xFFU),
         (uint8_t)((KEY_MSGOUT_NAV_PVT >> 24U) & 0xFFU),
-        0x01U,
+        0x01U, // Value: 1 (每次测量输出一次)
+        // --- Payload 结束 ---
 
-        0x00U, 0x00U
+        0x00U, 0x00U // Checksum 占位 (CK_A, CK_B)
     };
 
     ubx_nona_append_checksum(cfg_packet, sizeof(cfg_packet));
 
+    // 发送前清空输入缓冲区，防止残留 NMEA 文本污染后续解析
     unsigned int key = irq_lock();
-    ring_buf_reset(&ringbuf);
+    ring_buf_reset(&ctx->rx_raw_rb);
     irq_unlock(key);
 
     for (size_t i = 0U; i < sizeof(cfg_packet); i++)
     {
-        uart_poll_out(uart_dev, cfg_packet[i]);
+        uart_poll_out(ctx->uart_device, cfg_packet[i]);
     }
-    LOG_INF("M10 生产级持久化配置包注入成功！");
+    LOG_INF("M10 生产级持久化配置包已全量安全注入！");
 }
 
 // ==============================================================================
-// UBX 二进制流状态机内核 (彻底修复旧版 static 变量定义引发的严重溢出死机漏洞)
+// 2. 多实例解耦下的 UBX 二进制流状态机内核 (100% 像素级对齐您的原版运行逻辑)
 // ==============================================================================
-void process_ubx_nona_byte(uint8_t byte)
+void process_ubx_nona_byte(ublox_m10_context_t* ctx, uint8_t byte)
 {
-    static enum
+    if ((ctx == NULL) || (ctx->target_rb == NULL))
     {
-        STATE_IDLE,
-        STATE_SYNC2,
-        STATE_CLASS,
-        STATE_ID,
-        STATE_LEN1,
-        STATE_LEN2,
-        STATE_PAYLOAD,
-        STATE_CKA,
-        STATE_CKB
-    } state = STATE_IDLE;
-
-    static uint8_t u_class = 0U, u_id = 0U;
-    static uint16_t payload_len = 0U, payload_idx = 0U;
-
-    // ⭐ 根治致命隐患：显式开辟 256 字节的物理内存数组空间，杜绝越界踩踏
-    static uint8_t payload_buf[256];
-    static uint8_t ck_a = 0U, ck_b = 0U;
-    static uint8_t calc_ck_a = 0U, calc_ck_b = 0U;
-
+        return;
+    }
     gps_location_t fake_gps;
 
-    switch (state)
+    switch (ctx->parser_state)
     {
     case STATE_IDLE:
-        if (byte == UBX_SYNC_CHAR_1) state = STATE_SYNC2;
+        if (byte == UBX_SYNC_CHAR_1)
+        {
+            ctx->parser_state = STATE_SYNC2;
+        }
         break;
     case STATE_SYNC2:
-        state = (byte == UBX_SYNC_CHAR_2) ? STATE_CLASS : STATE_IDLE;
+        ctx->parser_state = (byte == UBX_SYNC_CHAR_2) ? STATE_CLASS : STATE_IDLE;
         break;
     case STATE_CLASS:
-        u_class = byte;
-        calc_ck_a = byte;
-        calc_ck_b = byte;
-        state = STATE_ID;
+        ctx->u_class = byte;
+        ctx->calc_ck_a = byte;
+        ctx->calc_ck_b = byte; // 复位 Fletcher 校验
+        ctx->parser_state = STATE_ID;
         break;
     case STATE_ID:
-        u_id = byte;
-        calc_ck_a += byte;
-        calc_ck_b += calc_ck_a;
-        state = STATE_LEN1;
+        ctx->u_id = byte;
+        ctx->calc_ck_a += byte;
+        ctx->calc_ck_b += ctx->calc_ck_a;
+        ctx->parser_state = STATE_LEN1;
         break;
     case STATE_LEN1:
-        payload_len = byte;
-        calc_ck_a += byte;
-        calc_ck_b += calc_ck_a;
-        state = STATE_LEN2;
+        ctx->payload_len = byte;
+        ctx->calc_ck_a += byte;
+        ctx->calc_ck_b += ctx->calc_ck_a;
+        ctx->parser_state = STATE_LEN2;
         break;
     case STATE_LEN2:
-        payload_len |= (uint16_t)((uint16_t)byte << 8);
-        calc_ck_a += byte;
-        calc_ck_b += calc_ck_a;
-        payload_idx = 0U;
-        state = ((payload_len > 0U) && (payload_len < sizeof(payload_buf))) ? STATE_PAYLOAD : STATE_IDLE;
+        ctx->payload_len |= (uint16_t)((uint16_t)byte << 8);
+        ctx->calc_ck_a += byte;
+        ctx->calc_ck_b += ctx->calc_ck_a;
+        ctx->payload_idx = 0U;
+        // 长度防御性限制，防止恶意长数据包撑爆本地 RAM 缓冲区
+        ctx->parser_state = ((ctx->payload_len > 0U) && (ctx->payload_len < sizeof(ctx->payload_buf)))
+                                ? STATE_PAYLOAD
+                                : STATE_IDLE;
         break;
     case STATE_PAYLOAD:
-        payload_buf[payload_idx] = byte;
-        payload_idx++;
-        calc_ck_a += byte;
-        calc_ck_b += calc_ck_a;
-        if (payload_idx >= payload_len) state = STATE_CKA;
+        ctx->payload_buf[ctx->payload_idx++] = byte; // 100% 还原原版自增语序
+        ctx->calc_ck_a += byte;
+        ctx->calc_ck_b += ctx->calc_ck_a;
+        if (ctx->payload_idx >= ctx->payload_len)
+        {
+            ctx->parser_state = STATE_CKA;
+        }
         break;
     case STATE_CKA:
-        ck_a = byte;
-        state = STATE_CKB;
+        ctx->ck_a = byte;
+        ctx->parser_state = STATE_CKB;
         break;
     case STATE_CKB:
-        ck_b = byte;
-        state = STATE_IDLE;
+        ctx->ck_b = byte;
+        ctx->parser_state = STATE_IDLE; // 本帧结束，状态机复位
 
-        if ((ck_a == calc_ck_a) && (ck_b == calc_ck_b))
+        // 严苛的端到端数据校验
+        if ((ctx->ck_a == ctx->calc_ck_a) && (ctx->ck_b == ctx->calc_ck_b))
         {
-            if ((u_class == 0x01U) && (u_id == 0x07U))
+            // 成功捕获高频综合导航包 (Class: 0x01, ID: 0x07 -> UBX-NAV-PVT)
+            if ((ctx->u_class == 0x01U) && (ctx->u_id == 0x07U))
             {
-                ubx_nav_pvt_t* pvt = (ubx_nav_pvt_t*)payload_buf;
+                // 100% 还原原版内存直接映射逻辑，调用在头文件中严格定义的 92 字节标准型
+                ubx_nav_pvt_t* pvt = (ubx_nav_pvt_t*)ctx->payload_buf;
 
                 fake_gps.fixType = pvt->fixType;
                 fake_gps.numSV = pvt->numSV;
@@ -202,8 +202,8 @@ void process_ubx_nona_byte(uint8_t byte)
                 fake_gps.lon = pvt->lon;
                 fake_gps.gSpeed = pvt->gSpeed;
 
-                // 完美注入 Zephyr 安全数据环
-                (void)gps_rb_push(&fake_gps);
+                // 完美推入多实例指定的、经过防系统崩溃优化的 Zephyr 原生数据环
+                (void)gps_rb_push(ctx->target_rb, &fake_gps);
             }
         }
         else
@@ -215,51 +215,73 @@ void process_ubx_nona_byte(uint8_t byte)
 }
 
 // ==============================================================================
-// 6. Zephyr 异步工作线程
+// 3. 多实例通用独立工作线程函数
 // ==============================================================================
-K_THREAD_STACK_DEFINE(gps_stack, GPS_THREAD_STACK_SIZE);
-static struct k_thread gps_thread_data;
-
-static void gps_process_thread(void* p1, void* p2, void* p3)
+static void gps_instance_process_thread(void* p1, void* p2, void* p3)
 {
-    ARG_UNUSED(p1);
+    ublox_m10_context_t* ctx = (ublox_m10_context_t*)p1;
     ARG_UNUSED(p2);
     ARG_UNUSED(p3);
     uint8_t byte;
 
-    LOG_INF("GPS 专属状态机独立解包工作线程正常启动");
+    if (ctx == NULL)
+    {
+        return;
+    }
 
-    k_sleep(K_MSEC(500));
-    gps_configure_ubx_nona_proc();
+    LOG_INF("GPS 驱动实例独立解包工作线程正常拉起.");
+    k_sleep(K_MSEC(500)); // 留出时间等待硬件和驱动层完全就绪
+    gps_configure_ubx_nona_proc(ctx); // 执行动态产品化配置
 
     while (1)
     {
-        (void)k_sem_take(&rx_sem, K_FOREVER);
-        while (ring_buf_get(&ringbuf, &byte, 1U) == 1U)
+        // 无数据挂起，该实例的专属 ISR 塞入字节时被精准唤醒
+        (void)k_sem_take(&ctx->rx_signal_sem, K_FOREVER);
+        while (ring_buf_get(&ctx->rx_raw_rb, &byte, 1U) == 1U)
         {
-            process_ubx_nona_byte(byte);
+            process_ubx_nona_byte(ctx, byte); // 字节流不间断喂给状态机解析
         }
     }
 }
 
-int init_ubx_nona_gps_uart(void)
+// ==============================================================================
+// 4. 通用多实例构造与配置入口
+// ==============================================================================
+int init_ubx_m10_driver_instance(ublox_m10_context_t* ctx,
+                                 const struct device* uart_dev_spec,
+                                 gps_rb_instance_t* out_rb_instance,
+                                 k_thread_stack_t* stack_mem,
+                                 int priority)
 {
-    if (!device_is_ready(uart_dev))
+    if ((ctx == NULL) || (uart_dev_spec == NULL) || (out_rb_instance == NULL) || (stack_mem == NULL))
     {
-        LOG_ERR("Device tree map error: GPS UART not ready!");
+        return -EINVAL;
+    }
+
+    if (!device_is_ready(uart_dev_spec))
+    {
+        LOG_ERR("传入物理串口设备未就绪！");
         return -ENODEV;
     }
 
-    ring_buf_init(&ringbuf, sizeof(rx_ring_buffer), rx_ring_buffer);
-    (void)k_sem_init(&rx_sem, 0U, UINT_MAX);
+    // 上下文成员初赋初值
+    ctx->uart_device = uart_dev_spec;
+    ctx->target_rb = out_rb_instance;
+    ctx->parser_state = STATE_IDLE;
 
-    uart_irq_callback_user_data_set(uart_dev, uart_callback, NULL);
-    uart_irq_rx_enable(uart_dev);
+    // 初始化内核同步对象
+    ring_buf_init(&ctx->rx_raw_rb, sizeof(ctx->rx_raw_mem), ctx->rx_raw_mem);
+    (void)k_sem_init(&ctx->rx_signal_sem, 0U, UINT_MAX);
 
-    (void)k_thread_create(&gps_thread_data, gps_stack,
-                          K_THREAD_STACK_SIZEOF(gps_stack),
-                          gps_process_thread, NULL, NULL, NULL,
-                          GPS_THREAD_PRIORITY, 0U, K_NO_WAIT);
+    // 绑定物理串口中断回调，并将 ctx 上下文指针作为 user_data 参数灌入中断
+    uart_irq_callback_user_data_set(ctx->uart_device, uart_callback, (void*)ctx);
+    uart_irq_rx_enable(ctx->uart_device);
+
+    // 为该实例动态拉起独立的状态机工作线程
+    (void)k_thread_create(&ctx->thread_data, stack_mem,
+                          GPS_THREAD_STACK_SZ,
+                          gps_instance_process_thread, (void*)ctx, NULL, NULL,
+                          priority, 0U, K_NO_WAIT);
 
     return 0;
 }

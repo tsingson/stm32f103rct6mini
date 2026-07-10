@@ -15,8 +15,37 @@
 static const struct spi_dt_spec spi_dev = SPI_DT_SPEC_GET(LIS3DH_NODE, SPI_WORD_SET(8) | SPI_TRANSFER_MSB);
 static const struct gpio_dt_spec int1_gpio = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), sensor_irq_gpios);
 
+// ring buffer
+GPS_RB_INSTANCE_DEFINE(gps_rb_main);
+//
+static ublox_m10_context_t gps_driver_ctx_main;
+K_THREAD_STACK_DEFINE(gps_stack_main, GPS_THREAD_STACK_SZ);
+//
+
+// A. 从设备树安全获取两路不同的 STM32 硬件串口
+const struct device* ublox_m10_gps_uart3_device = DEVICE_DT_GET(DT_NODELABEL(usart3));
+
+
 int main(void)
 {
+    /**
+     * gps
+     */
+
+    gps_rb_init(&gps_rb_main, gps_rb_main_raw_buf, sizeof(gps_rb_main_raw_buf));
+    init_ubx_m10_driver_instance(&gps_driver_ctx_main, ublox_m10_gps_uart3_device, &gps_rb_main, gps_stack_main, 5);
+
+    /**
+    while(1) {
+        gps_location_t main_loc;
+        // 随时通过指定句柄消费对应实例的数据，两路完全并存、互不干扰
+        if (gps_rb_pop(&gps_rb_main, &main_loc)) {
+            // 消费主 GPS 数据...
+        }
+        k_sleep(K_MSEC(10));
+    }
+    */
+
     int16_t x_raw = 0, y_raw = 0, z_raw = 0;
     uint32_t total_steps = 0U, steps_inc = 0U;
     walk_pedometer_t my_pedometer;
@@ -38,17 +67,6 @@ int main(void)
     /* ================================================================= */
     /* initial GPS u-blox m10 nano */
     printf("STM32F103_MINI 系统核心启动中...");
-
-    // 1. 初始化 Zephyr 原生对象环形缓冲区
-    gps_rb_init();
-
-    // 2. 启动 u-blox 串口中断底层接收内核 (内部会自动创建专属解包线程，无需您手动写 task 轮询)
-    int ret = init_ubx_nona_gps_uart();
-    if (ret != 0)
-    {
-        printf("GPS 串口中断内核拉起失败: %d", ret);
-        return ret;
-    }
 
 
     while (1)
