@@ -16,7 +16,7 @@ static const struct spi_dt_spec spi_dev = SPI_DT_SPEC_GET(LIS3DH_NODE, SPI_WORD_
 static const struct gpio_dt_spec int1_gpio = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), sensor_irq_gpios);
 
 // ring buffer
-GPS_RB_INSTANCE_DEFINE(gps_rb_main);
+GPS_RB_INSTANCE_DEFINE (gps_rb_main);
 //
 static ublox_m10_context_t gps_driver_ctx_main;
 K_THREAD_STACK_DEFINE(gps_stack_main, GPS_THREAD_STACK_SZ);

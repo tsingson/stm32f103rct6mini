@@ -42,8 +42,8 @@ struct log_item
 
 RING_BUF_DECLARE(log_ring_buf, sizeof(struct log_item) * LOG_QUEUE_SIZE);
 static struct k_spinlock log_lock;
-K_CONDVAR_DEFINE(log_condvar);
-K_MUTEX_DEFINE(log_mutex);
+K_CONDVAR_DEFINE (log_condvar);
+K_MUTEX_DEFINE (log_mutex);
 
 void safe_log(const char* format, ...)
 {
