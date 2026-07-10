@@ -5,6 +5,9 @@
 		button-user = &btn_pc6;
 		modem-power = &pwr_4g;
 		gps-power = &pwr_gps;
+
+		/* ⭐ 新增：为您的 C 驱动添加串口映射别名，使其能够通过 DT_ALIAS(gps_uart) 成功捕获硬件 */
+		gps-uart = &usart3;
 	};
 
 	leds {
@@ -37,10 +40,13 @@
 	status = "okay";
 };
 
+/* ================== GPS 串口部分修正 ================== */
 &usart3 {
 	pinctrl-0 = <&usart3_tx_pb10 &usart3_rx_pb11>;
 	pinctrl-names = "default";
-	current-speed = <9600>;
+
+	/* ⭐ 修正：修改为 38400 匹配 u-blox M10 的默认初始化频率 */
+	current-speed = <38400>;
 	status = "okay";
 };
 
@@ -94,9 +100,10 @@
 		reg = <0>;
 		spi-max-frequency = <100000>; /* 从 1,000,000 降到 100,000 (100kHz) */
 		/* 新增：配置 INT1 中断引脚接在 PA1，高电平有效 */
- 	//	irq-gpios = <&gpioa 1 GPIO_ACTIVE_HIGH>;
+		//	irq-gpios = <&gpioa 1 GPIO_ACTIVE_HIGH>;
 	};
 };
+
 / {
 	zephyr,user {
 		/* 把引脚挂在用户自定义节点下，避开兼容性检查 */
