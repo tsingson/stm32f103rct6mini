@@ -1,6 +1,6 @@
 /**
  * @file ublox_m10_nano.h
- * @brief Zephyr 4.4.1 通用 u-blox M10 Nano GPS 驱动头文件 (严格符合 C17)
+ * @brief Zephyr 4.4.1 通用 u-blox M10 Nano GPS 驱动头文件 (生产交付级，严格符合 C17)
  */
 
 #ifndef UBLOX_M10_NANO_H
@@ -28,7 +28,7 @@
 #define KEY_MSGOUT_NAV_PVT    0x20910007U
 
 // ==============================================================================
-// 2. UBX-NAV-PVT 数据结构体定义 (严格符合 C17 内存对齐属性)
+// 2. UBX-NAV-PVT 数据结构体定义 (严格符合 C17 内存对齐属性，固定 92 字节)
 // ==============================================================================
 struct __attribute__((packed)) ubx_nav_pvt {
     uint32_t iTOW;    // GPS 毫秒时间戳
@@ -60,7 +60,7 @@ struct __attribute__((packed)) ubx_nav_pvt {
     uint32_t headAcc; // 航向精度 (deg * 1e-5)
     uint16_t pDOP;    // 位置位置因子 (0.01)
     uint8_t flags3;   // 额外标志3
-    uint8_t reserved1[5]; // 严格对齐原版 92 字节载荷补全
+    uint8_t reserved1[5]; // 补齐 92 字节物理载荷大小
 };
 
 typedef struct ubx_nav_pvt ubx_nav_pvt_t;
@@ -76,15 +76,7 @@ typedef struct ubx_nav_pvt ubx_nav_pvt_t;
 int init_ubx_nona_gps_uart(void);
 
 /**
- * @brief 获取最新的 GPS 导航定位数据 (线程安全)
- * @param pvt 目标结构体指针
- */
-void gps_ubx_m10_get_data(ubx_nav_pvt_t *pvt);
-
-/**
  * @brief 计算并追加 UBX 校验和
- * @param buffer 数据缓冲区
- * @param len 整个数据包的长度（含头部及2字节校验和占位）
  */
 void ubx_nona_append_checksum(uint8_t *buffer, size_t len);
 
@@ -95,7 +87,6 @@ void gps_configure_ubx_nona_proc(void);
 
 /**
  * @brief 字节流状态机解析核心
- * @param byte 接收到的单字节
  */
 void process_ubx_nona_byte(uint8_t byte);
 
