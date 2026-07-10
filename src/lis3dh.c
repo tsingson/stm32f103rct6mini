@@ -91,7 +91,9 @@ int lis3dh_clear_interrupt(const struct spi_dt_spec* spi_spec, uint8_t* src)
 int lis3dh_read_xyz(const struct spi_dt_spec* spi_spec, int16_t* x, int16_t* y, int16_t* z)
 {
     uint8_t axis_data[6];
-    if (lis3dh_reg_read(spi_spec, LIS3DH_REG_OUT_X_L, axis_data, 6) == 0)
+    /* 💡 核心：0x28 (OUT_X_L) | 0x80 (读指令) | 0x40 (多字节自增) = 0xC8 */
+    uint8_t reg_addr = LIS3DH_REG_OUT_X_L | 0x80U | 0x40U;
+    if (lis3dh_reg_read(spi_spec, reg_addr, axis_data, 6) == 0)
     {
         *x = ((int16_t)((axis_data[1] << 8) | axis_data[0]));
         *y = ((int16_t)((axis_data[3] << 8) | axis_data[2]));
@@ -105,11 +107,10 @@ int lis3dh_read_xyz(const struct spi_dt_spec* spi_spec, int16_t* x, int16_t* y, 
 
 int lis3dh_enter_low_power_wom(const struct spi_dt_spec* spi_spec, uint8_t threshold_lsb)
 {
-    int ret;
     uint8_t dummy_src = 0U;
 
     /* 1. 先关闭中断使能，防止配置过程中的瞬时乱序电平误触发主控 */
-    ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_CFG, 0x00U);
+    int ret = lis3dh_reg_write(spi_spec, LIS3DH_REG_INT1_CFG, 0x00U);
     if (ret < 0) return ret;
 
     /* 2. 配置 CTRL_REG1: ODR = 10Hz, 正常模式(8-bit), 三轴使能 */
