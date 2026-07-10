@@ -96,7 +96,8 @@
 	cs-gpios = <&gpioa 4 GPIO_ACTIVE_LOW>;
 
 	lis3dsh: lis3dsh@0 {
-		compatible = "vnd,spi-device";
+	//	compatible = "vnd,spi-device"; //   这个是自定义 SPI 驱动
+    	compatible = "st,lis2dh";  // 这个是 lis2dh, 要注意运行有问题时, 切回上面 vnd, spi-device
 		reg = <0>;
 		spi-max-frequency = <100000>; /* 从 1,000,000 降到 100,000 (100kHz) */
 	};

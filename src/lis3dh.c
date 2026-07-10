@@ -4,6 +4,8 @@
 #define SPI_READ_BIT           0x80
 #define SPI_AUTO_INC_BIT       0x40
 
+
+
 int lis3dh_reg_write(const struct spi_dt_spec* spi_spec, uint8_t reg, uint8_t data)
 {
     uint8_t tx_buf[2] = {reg, data};
