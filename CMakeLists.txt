@@ -10,6 +10,8 @@ project(stm32mini_gps)
 
 target_sources(app PRIVATE src/main.c
         src/ublox_m10_nano.c
+        src/gps_ring_buffer.c
+        src/ublox_m10_nano_app.c
         src/lis3dh.c
         src/walk.c
 )

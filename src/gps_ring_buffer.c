@@ -11,7 +11,7 @@
 #define GPS_RING_BUF_BYTE_SIZE (REQ_CAPACITY * sizeof(gps_location_t))
 
 // 声明一个无任何元数据损耗、完美对齐的 Zephyr 2阶幂原生环形缓冲区
-RING_BUF_DECLARE_POW2(zephyr_gps_byte_rb, GPS_RING_BUF_BYTE_SIZE);
+RING_BUF_DECLARE(zephyr_gps_byte_rb, GPS_RING_BUF_BYTE_SIZE);
 
 void gps_rb_init(void)
 {
