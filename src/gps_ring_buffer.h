@@ -1,18 +1,19 @@
 /**
 * @file gps_ring_buffer.h
- * @brief 高可靠性通用 GPS 环形缓冲区头文件 (生产交付级，严格符合 C17)
+ * @brief Multi-instance GPS Ring Buffer Core Header (Production-Grade C17 / Zephyr 4.4.1)
  */
 
 #ifndef GPS_RING_BUFFER_H
 #define GPS_RING_BUFFER_H
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/ring_buffer.h>
 #include <stdint.h>
 #include <stdbool.h>
 
 #define REQ_CAPACITY 16U
 
-/* 保留用户核心 GPS 结构体 (16字节) */
+/* Core 16-byte GPS context representation data structure */
 typedef struct {
     uint8_t fixType;
     uint8_t numSV;
@@ -21,26 +22,35 @@ typedef struct {
     int32_t gSpeed;
 } gps_location_t;
 
+#define GPS_RING_BUF_BYTE_SIZE (REQ_CAPACITY * sizeof(gps_location_t))
+
+// Container layout tracking structure instance
+typedef struct {
+    struct ring_buf rb_meta;
+} gps_rb_instance_t;
+
+// ==============================================================================
+// ⭐ FIXED COMPLIANT MACRO DEFINE (Zero struct hack, purely allocates memory blocks)
+// ==============================================================================
 /**
- * @brief 初始化环形缓冲区
+ * @brief Statically allocate tracking objects and array contexts for a new ring buffer instance.
+ * @param name The global token identifier of your queue tracker.
  */
-void gps_rb_init(void);
+#define GPS_RB_INSTANCE_DEFINE(name)                                           \
+    uint8_t __aligned(4) name##_raw_buf[GPS_RING_BUF_BYTE_SIZE];               \
+    gps_rb_instance_t name
+
+// ==============================================================================
+// Function APIs
+// ==============================================================================
 
 /**
- * @brief 压入新数据。若缓冲区满（如消费者不存在），将安全拒绝写入，绝不崩溃。
- * @return 0 成功, 负数 空间已满或失败
+ * @brief Explicit runtime configuration interface binding raw arrays to structural context blocks
  */
-int gps_rb_push(const gps_location_t *new_data);
+void gps_rb_init(gps_rb_instance_t *instance, uint8_t *raw_buffer, uint32_t raw_buffer_size);
 
-/**
- * @brief 从缓冲区弹出一帧最早的未读数据 (非阻塞)
- * @return true 成功获取数据, false 缓冲区当前为空
- */
-bool gps_rb_pop(gps_location_t *out_data);
-
-/**
- * @brief 获取当前环形缓冲区内剩余的未读数据帧数
- */
-uint32_t gps_rb_get_unread_count(void);
+int gps_rb_push(gps_rb_instance_t *instance, const gps_location_t *new_data);
+bool gps_rb_pop(gps_rb_instance_t *instance, gps_location_t *out_data);
+uint32_t gps_rb_get_unread_count(const gps_rb_instance_t *instance);
 
 #endif // GPS_RING_BUFFER_H

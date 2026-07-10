@@ -1,6 +1,6 @@
 /**
  * @file ublox_m10_nano.h
- * @brief Zephyr 4.4.1 通用 u-blox M10 Nano GPS 驱动头文件 (生产交付级，严格符合 C17)
+ * @brief 支持多实例调用的 u-blox M10 GPS 驱动头文件 (最终生产交付级，严格符合 C17 / Zephyr 4.4.1)
  */
 
 #ifndef UBLOX_M10_NANO_H
@@ -8,27 +8,27 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/sys/ring_buffer.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "gps_ring_buffer.h"
 
-// ==============================================================================
-// 1. 核心协议宏定义
-// ==============================================================================
+// 核心协议宏定义
 #define UBX_SYNC_CHAR_1       0xB5U
 #define UBX_SYNC_CHAR_2       0x62U
 #define UBX_CLASS_CFG         0x06U
 #define UBX_ID_VALSET         0x8AU
-
-// 配置存储目标层 (Layers)
 #define UBX_LAYER_ALL         0x07U
 
-// u-blox M10 配置键值 ID (Key IDs)
 #define KEY_UART1OUTPROT_UBX  0x20010021U
 #define KEY_RATE_MEAS         0x30210001U
 #define KEY_MSGOUT_NAV_PVT    0x20910007U
 
+#define RX_RAW_RING_BUF_SIZE  1024U
+#define GPS_THREAD_STACK_SZ   2048U
+
 // ==============================================================================
-// 2. UBX-NAV-PVT 数据结构体定义 (严格符合 C17 内存对齐属性，固定 92 字节)
+// 1. ⭐ 补充恢复：UBX-NAV-PVT 数据结构体定义 (严格符合 C17 内存对齐属性，固定 92 字节)
 // ==============================================================================
 struct __attribute__((packed)) ubx_nav_pvt {
     uint32_t iTOW;    // GPS 毫秒时间戳
@@ -60,34 +60,67 @@ struct __attribute__((packed)) ubx_nav_pvt {
     uint32_t headAcc; // 航向精度 (deg * 1e-5)
     uint16_t pDOP;    // 位置位置因子 (0.01)
     uint8_t flags3;   // 额外标志3
-    uint8_t reserved1[5]; // 补齐 92 字节物理载荷大小
+    uint8_t reserved1; // 补齐 92 字节物理载荷大小
 };
 
 typedef struct ubx_nav_pvt ubx_nav_pvt_t;
 
 // ==============================================================================
-// 3. 驱动外部接口 API
+// 2. GPS 驱动实例软硬件统一上下文结构体 (Context)
+// ==============================================================================
+typedef struct {
+    const struct device *uart_device;        // 绑定的底层物理串口设备指针
+    gps_rb_instance_t *target_rb;            // 该硬件解包后注入的目标多实例环形缓冲区
+
+    struct ring_buf rx_raw_rb;               // 专属的硬件中断原始字节环形队列
+    uint8_t rx_raw_mem[RX_RAW_RING_BUF_SIZE];// 专属的字节队列物理内存
+    struct k_sem rx_signal_sem;              // 精准唤醒解包线程的专属信号量
+
+    struct k_thread thread_data;             // 专属的独立工作线程控制块
+    k_thread_stack_t *thread_stack;          // 外部传入分配的独立线程栈内存
+
+    // 状态机私有上下文
+    uint8_t parser_state;
+    uint8_t u_class;
+    uint8_t u_id;
+    uint16_t payload_len;
+    uint16_t payload_idx;
+    uint8_t payload_buf[256];                // 状态机解包物理缓存区
+    uint8_t ck_a;
+    uint8_t ck_b;
+    uint8_t calc_ck_a;
+    uint8_t calc_ck_b;
+} ublox_m10_context_t;
+
+// ⭐ 彻底删除原第 52 行的 #include "ublox_m10_nano.h"（死循环自包含漏洞已完全根治）
+
+// ==============================================================================
+// 3. 多实例通用驱动外部公开 API 接口
 // ==============================================================================
 
 /**
- * @brief 初始化 GPS 驱动线程与串口硬件
+ * @brief 初始化一个指定的 GPS 驱动硬件实例并自动拉起状态机异步线程
+ * @param ctx 目标驱动上下文结构体指针
+ * @param uart_dev_spec 绑定的底层串口物理设备
+ * @param out_rb_instance 成功解包后绑定的数据去向目标多实例环形缓冲区
+ * @param stack_mem 分配给该驱动解包线程的栈内存空间指针 (通过 K_THREAD_STACK_DEFINE 创建)
+ * @param priority 线程抢占优先级 (建议设置为 5)
  * @return 0 成功, 负数 错误码
  */
-int init_ubx_nona_gps_uart(void);
+int init_ubx_m10_driver_instance(ublox_m10_context_t *ctx,
+                                 const struct device *uart_dev_spec,
+                                 gps_rb_instance_t *out_rb_instance,
+                                 k_thread_stack_t *stack_mem,
+                                 int priority);
 
 /**
- * @brief 计算并追加 UBX 校验和
+ * @brief 向特定 GPS 实例注入多键值 ValSet 产品化持久配置
  */
-void ubx_nona_append_checksum(uint8_t *buffer, size_t len);
+void gps_configure_ubx_nona_proc(ublox_m10_context_t *ctx);
 
 /**
- * @brief 向 GPS 发送 M10 专属优化配置流
+ * @brief 针对特定 GPS 实例进行字节流解析的状态机接口
  */
-void gps_configure_ubx_nona_proc(void);
-
-/**
- * @brief 字节流状态机解析核心
- */
-void process_ubx_nona_byte(uint8_t byte);
+void process_ubx_nona_byte(ublox_m10_context_t *ctx, uint8_t byte);
 
 #endif // UBLOX_M10_NANO_H
