@@ -25,9 +25,9 @@ int main(void)
     /* ================================================================= */
     /* 💡 全自动均值自适应初始化配置                                        */
     /* ================================================================= */
-    uint32_t adaptive_debounce = 420U;   /* 420ms 基础迈步防抖去回弹 */
-    uint32_t adaptive_timeout  = 4500U;  /* 放宽断步超时时间为 4.5 秒，纵容慢速走停 */
-    uint32_t min_amplitude     = 140U;   /* 幅度阻尼：动作起伏低于 140 LSB 的纯杂噪直接过滤 */
+    uint32_t adaptive_debounce = 420U; /* 420ms 基础迈步防抖去回弹 */
+    uint32_t adaptive_timeout = 4500U; /* 放宽断步超时时间为 4.5 秒，纵容慢速走停 */
+    uint32_t min_amplitude = 140U; /* 幅度阻尼：动作起伏低于 140 LSB 的纯杂噪直接过滤 */
 
     /* 一键配置，算法内部将自动跟踪 Peak-Valley 并划定中间动态门槛 */
     walk_pedometer_init(&my_pedometer, 2, adaptive_debounce, adaptive_timeout, min_amplitude);
@@ -40,11 +40,15 @@ int main(void)
             int64_t now_ms = k_uptime_get();
             (void)walk_pedometer_process(&my_pedometer, x_raw, y_raw, z_raw, now_ms, &steps_inc);
 
-            if (steps_inc > 0U) {
+            if (steps_inc > 0U)
+            {
                 total_steps += steps_inc;
-                if (steps_inc == (uint32_t)WALK_REQUIRED_STEPS) {
+                if (steps_inc == (uint32_t)WALK_REQUIRED_STEPS)
+                {
                     printf("\n🚀🚀🚀 [ADAPTIVE ACTIVE] 自动追踪步态成功！追加 %u 步。总步数: %u\n\n", WALK_REQUIRED_STEPS, total_steps);
-                } else {
+                }
+                else
+                {
                     printf("🚶 [ADAPTIVE WALK] 规律波幅动态跨越，实时加步。总步数: %u\n", total_steps);
                 }
             }
