@@ -18,7 +18,7 @@ LOG_MODULE_REGISTER(ublox_m10, CONFIG_GPS_LOG_LEVEL);
 #error "设备树别名 'gps_uart' 未启用或未定义。请检查您的 stm32f103_mini.overlay 文件！"
 #endif
 
-static const struct device *const uart_dev = DEVICE_DT_GET(GPS_UART_NODE);
+static const struct device* const uart_dev = DEVICE_DT_GET(GPS_UART_NODE);
 
 #define RX_RING_BUF_SIZE 1024U
 #define GPS_THREAD_STACK_SIZE 2048U
@@ -31,31 +31,37 @@ static struct k_sem rx_sem;
 // ==============================================================================
 // UART 中断回调函数 (将物理字节安全暂存至硬件环形缓冲区)
 // ==============================================================================
-static void uart_callback(const struct device *dev, void *user_data)
+static void uart_callback(const struct device* dev, void* user_data)
 {
     uint8_t c;
     ARG_UNUSED(user_data);
 
-    if (!uart_irq_update(dev)) {
+    if (!uart_irq_update(dev))
+    {
         return;
     }
 
-    if (uart_irq_rx_ready(dev)) {
-        while (uart_fifo_read(dev, &c, 1U) == 1) {
-            if (ring_buf_put(&ringbuf, &c, 1U) == 1U) {
+    if (uart_irq_rx_ready(dev))
+    {
+        while (uart_fifo_read(dev, &c, 1U) == 1)
+        {
+            if (ring_buf_put(&ringbuf, &c, 1U) == 1U)
+            {
                 k_sem_give(&rx_sem);
             }
         }
     }
 }
 
-void ubx_nona_append_checksum(uint8_t *buffer, size_t len)
+void ubx_nona_append_checksum(uint8_t* buffer, size_t len)
 {
-    if ((buffer == NULL) || (len < 8U)) {
+    if ((buffer == NULL) || (len < 8U))
+    {
         return;
     }
     uint8_t ck_a = 0U, ck_b = 0U;
-    for (size_t i = 2U; i < (len - 2U); i++) {
+    for (size_t i = 2U; i < (len - 2U); i++)
+    {
         ck_a += buffer[i];
         ck_b += ck_a;
     }
@@ -101,7 +107,8 @@ void gps_configure_ubx_nona_proc(void)
     ring_buf_reset(&ringbuf);
     irq_unlock(key);
 
-    for (size_t i = 0U; i < sizeof(cfg_packet); i++) {
+    for (size_t i = 0U; i < sizeof(cfg_packet); i++)
+    {
         uart_poll_out(uart_dev, cfg_packet[i]);
     }
     LOG_INF("M10 生产级持久化配置包注入成功！");
@@ -112,7 +119,8 @@ void gps_configure_ubx_nona_proc(void)
 // ==============================================================================
 void process_ubx_nona_byte(uint8_t byte)
 {
-    static enum {
+    static enum
+    {
         STATE_IDLE,
         STATE_SYNC2,
         STATE_CLASS,
@@ -134,7 +142,8 @@ void process_ubx_nona_byte(uint8_t byte)
 
     gps_location_t fake_gps;
 
-    switch (state) {
+    switch (state)
+    {
     case STATE_IDLE:
         if (byte == UBX_SYNC_CHAR_1) state = STATE_SYNC2;
         break;
@@ -143,29 +152,34 @@ void process_ubx_nona_byte(uint8_t byte)
         break;
     case STATE_CLASS:
         u_class = byte;
-        calc_ck_a = byte; calc_ck_b = byte;
+        calc_ck_a = byte;
+        calc_ck_b = byte;
         state = STATE_ID;
         break;
     case STATE_ID:
         u_id = byte;
-        calc_ck_a += byte; calc_ck_b += calc_ck_a;
+        calc_ck_a += byte;
+        calc_ck_b += calc_ck_a;
         state = STATE_LEN1;
         break;
     case STATE_LEN1:
         payload_len = byte;
-        calc_ck_a += byte; calc_ck_b += calc_ck_a;
+        calc_ck_a += byte;
+        calc_ck_b += calc_ck_a;
         state = STATE_LEN2;
         break;
     case STATE_LEN2:
         payload_len |= (uint16_t)((uint16_t)byte << 8);
-        calc_ck_a += byte; calc_ck_b += calc_ck_a;
+        calc_ck_a += byte;
+        calc_ck_b += calc_ck_a;
         payload_idx = 0U;
         state = ((payload_len > 0U) && (payload_len < sizeof(payload_buf))) ? STATE_PAYLOAD : STATE_IDLE;
         break;
     case STATE_PAYLOAD:
         payload_buf[payload_idx] = byte;
         payload_idx++;
-        calc_ck_a += byte; calc_ck_b += calc_ck_a;
+        calc_ck_a += byte;
+        calc_ck_b += calc_ck_a;
         if (payload_idx >= payload_len) state = STATE_CKA;
         break;
     case STATE_CKA:
@@ -176,9 +190,11 @@ void process_ubx_nona_byte(uint8_t byte)
         ck_b = byte;
         state = STATE_IDLE;
 
-        if ((ck_a == calc_ck_a) && (ck_b == calc_ck_b)) {
-            if ((u_class == 0x01U) && (u_id == 0x07U)) {
-                ubx_nav_pvt_t *pvt = (ubx_nav_pvt_t *)payload_buf;
+        if ((ck_a == calc_ck_a) && (ck_b == calc_ck_b))
+        {
+            if ((u_class == 0x01U) && (u_id == 0x07U))
+            {
+                ubx_nav_pvt_t* pvt = (ubx_nav_pvt_t*)payload_buf;
 
                 fake_gps.fixType = pvt->fixType;
                 fake_gps.numSV = pvt->numSV;
@@ -189,7 +205,9 @@ void process_ubx_nona_byte(uint8_t byte)
                 // 完美注入 Zephyr 安全数据环
                 (void)gps_rb_push(&fake_gps);
             }
-        } else {
+        }
+        else
+        {
             LOG_WRN("UBX Frame Checksum Error!");
         }
         break;
@@ -202,9 +220,11 @@ void process_ubx_nona_byte(uint8_t byte)
 K_THREAD_STACK_DEFINE(gps_stack, GPS_THREAD_STACK_SIZE);
 static struct k_thread gps_thread_data;
 
-static void gps_process_thread(void *p1, void *p2, void *p3)
+static void gps_process_thread(void* p1, void* p2, void* p3)
 {
-    ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
+    ARG_UNUSED(p1);
+    ARG_UNUSED(p2);
+    ARG_UNUSED(p3);
     uint8_t byte;
 
     LOG_INF("GPS 专属状态机独立解包工作线程正常启动");
@@ -212,9 +232,11 @@ static void gps_process_thread(void *p1, void *p2, void *p3)
     k_sleep(K_MSEC(500));
     gps_configure_ubx_nona_proc();
 
-    while (1) {
+    while (1)
+    {
         (void)k_sem_take(&rx_sem, K_FOREVER);
-        while (ring_buf_get(&ringbuf, &byte, 1U) == 1U) {
+        while (ring_buf_get(&ringbuf, &byte, 1U) == 1U)
+        {
             process_ubx_nona_byte(byte);
         }
     }
@@ -222,7 +244,8 @@ static void gps_process_thread(void *p1, void *p2, void *p3)
 
 int init_ubx_nona_gps_uart(void)
 {
-    if (!device_is_ready(uart_dev)) {
+    if (!device_is_ready(uart_dev))
+    {
         LOG_ERR("Device tree map error: GPS UART not ready!");
         return -ENODEV;
     }

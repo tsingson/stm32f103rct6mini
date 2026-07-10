@@ -4,6 +4,10 @@
 #include <stdio.h>
 #include "lis3dh.h"
 #include "walk.h"
+#include "ublox_m10_nano.h"
+#include "gps_ring_buffer.h"
+#include <zephyr/logging/log.h>
+#include <stdlib.h>
 
 #define SAMPLING_RATE_MS    (40)
 #define LIS3DH_NODE         DT_NODELABEL(lis3dsh)
@@ -25,13 +29,27 @@ int main(void)
     /* ================================================================= */
     /* 💡 全自动均值自适应初始化配置                                        */
     /* ================================================================= */
-    uint32_t adaptive_debounce = 420U;   /* 420ms 基础迈步防抖去回弹 */
-    uint32_t adaptive_timeout  = 4500U;  /* 放宽断步超时时间为 4.5 秒，纵容慢速走停 */
-    uint32_t min_amplitude     = 140U;   /* 幅度阻尼：动作起伏低于 140 LSB 的纯杂噪直接过滤 */
+    uint32_t adaptive_debounce = 420U; /* 420ms 基础迈步防抖去回弹 */
+    uint32_t adaptive_timeout = 4500U; /* 放宽断步超时时间为 4.5 秒，纵容慢速走停 */
+    uint32_t min_amplitude = 140U; /* 幅度阻尼：动作起伏低于 140 LSB 的纯杂噪直接过滤 */
 
     /* 一键配置，算法内部将自动跟踪 Peak-Valley 并划定中间动态门槛 */
     walk_pedometer_init(&my_pedometer, 2, adaptive_debounce, adaptive_timeout, min_amplitude);
     /* ================================================================= */
+    /* initial GPS u-blox m10 nano */
+    printf("STM32F103_MINI 系统核心启动中...");
+
+    // 1. 初始化 Zephyr 原生对象环形缓冲区
+    gps_rb_init();
+
+    // 2. 启动 u-blox 串口中断底层接收内核 (内部会自动创建专属解包线程，无需您手动写 task 轮询)
+    int ret = init_ubx_nona_gps_uart();
+    if (ret != 0)
+    {
+        printf("GPS 串口中断内核拉起失败: %d", ret);
+        return ret;
+    }
+
 
     while (1)
     {
@@ -40,11 +58,15 @@ int main(void)
             int64_t now_ms = k_uptime_get();
             (void)walk_pedometer_process(&my_pedometer, x_raw, y_raw, z_raw, now_ms, &steps_inc);
 
-            if (steps_inc > 0U) {
+            if (steps_inc > 0U)
+            {
                 total_steps += steps_inc;
-                if (steps_inc == (uint32_t)WALK_REQUIRED_STEPS) {
+                if (steps_inc == (uint32_t)WALK_REQUIRED_STEPS)
+                {
                     printf("\n🚀🚀🚀 [ADAPTIVE ACTIVE] 自动追踪步态成功！追加 %u 步。总步数: %u\n\n", WALK_REQUIRED_STEPS, total_steps);
-                } else {
+                }
+                else
+                {
                     printf("🚶 [ADAPTIVE WALK] 规律波幅动态跨越，实时加步。总步数: %u\n", total_steps);
                 }
             }
