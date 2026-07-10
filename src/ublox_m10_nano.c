@@ -7,7 +7,9 @@
 #include <zephyr/logging/log.h>
 #include <string.h>
 
-LOG_MODULE_REGISTER(ublox_m10, CONFIG_GPS_LOG_LEVEL);
+// 🌟 FIX: Change CONFIG_GPS_LOG_LEVEL to standard LOG_LEVEL_INF (or LOG_LEVEL_DBG)
+LOG_MODULE_REGISTER(ublox_m10, LOG_LEVEL_INF);
+
 
 // 定义 100% 对齐原版的状态机内部枚举
 enum
